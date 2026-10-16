@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>osui</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <div class="brand">osui <span id="conn" class="dot off" title="daemon connection"></span><span id="connText" class="muted">waiting for daemon…</span></div>
+  <nav id="tabs">
+    <button data-tab="prompts" class="active">Prompts <span id="promptBadge" class="badge hidden">0</span></button>
+    <button data-tab="rules">Rules <span id="ruleCount" class="muted"></span></button>
+    <button data-tab="log">Connections</button>
+  </nav>
+  <div id="stats" class="muted"></div>
+</header>
+
+<main>
+  <section id="tab-prompts"></section>
+  <section id="tab-rules" class="hidden"></section>
+  <section id="tab-log" class="hidden"></section>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="editorForm">
+    <h3 id="editorTitle">Edit rule</h3>
+    <textarea id="editorText" spellcheck="false" rows="22"></textarea>
+    <p id="editorErr" class="err"></p>
+    <div class="row end">
+      <button value="cancel" class="ghost">Cancel</button>
+      <button id="editorSave" value="save" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>
