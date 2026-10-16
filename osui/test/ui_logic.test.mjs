@@ -8,7 +8,7 @@ const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub, set
 const ctx = vm.createContext({ document: stub, window: {}, fetch: () => Promise.reject(new Error('offline')),
   EventSource: stub, console, setTimeout, clearTimeout, requestAnimationFrame: () => 0, confirm: () => true });
 const src = fs.readFileSync(new URL('../internal/web/static/app.js', import.meta.url), 'utf8');
-vm.runInContext(src + '\n;globalThis.T = { parseEntry, scopes, baseDomain, denyName, entryName, classifyName: pk };', ctx);
+vm.runInContext(src + '\n;globalThis.T = { parseEntry, scopes, baseDomain, denyName, entryName, classifyName: pk, describeIntent };', ctx);
 const T = ctx.T;
 
 // domains
@@ -46,4 +46,8 @@ assert.ok(sc.find(s => s.id === 'domain').operator.list[1].data.includes('github
 assert.ok(sc.find(s => s.id === 'proc').broad);
 assert.equal(T.baseDomain('www.bbc.co.uk'), 'bbc.co.uk');
 assert.equal(T.scopes({ path: '/x', dstHost: '', dstIp: '1.1.1.1', dstPort: 53 })[0].id, 'ip-port');
+// LLM proposals are re-validated client-side; bad destinations are reported, not applied
+const d = T.describeIntent({ destinations: ['github.com', 'bad host!', '10.0.0.0/8', '999.9.9.9'], include_subdomains: true });
+assert.equal(JSON.stringify(d.parsed.map(x => x.text)), JSON.stringify(['*.github.com', '10.0.0.0/8']));
+assert.equal(d.problems.length, 2);
 console.log('ui logic: all passed');

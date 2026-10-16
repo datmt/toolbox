@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"osui/internal/hub"
+	"osui/internal/llm"
 	pb "osui/internal/pb"
 )
 
@@ -27,6 +28,7 @@ type Web struct {
 	Hub   *hub.Hub
 	Token string
 	Addr  string // host:port the browser uses
+	LLM   *llm.Client
 
 	mux *http.ServeMux
 }
@@ -43,6 +45,9 @@ func New(h *hub.Hub, token, addr string) *Web {
 	w.mux.HandleFunc("POST /api/rules", w.upsertRule)
 	w.mux.HandleFunc("POST /api/rules/{name}/{op}", w.ruleOp)
 	w.mux.HandleFunc("DELETE /api/rules/{name}", w.deleteRule)
+	w.mux.HandleFunc("GET /api/llm", w.llmGet)
+	w.mux.HandleFunc("POST /api/llm", w.llmSet)
+	w.mux.HandleFunc("POST /api/llm/propose", w.llmPropose)
 	return w
 }
 
@@ -322,4 +327,81 @@ func (w *Web) deleteRule(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(rw, 200, map[string]bool{"ok": true})
+}
+
+// ---- LLM helper: proposes allowlist entries, never creates rules ----
+
+func (w *Web) llmGet(rw http.ResponseWriter, _ *http.Request) {
+	if w.LLM == nil {
+		writeJSON(rw, 200, llm.Public{})
+		return
+	}
+	writeJSON(rw, 200, w.LLM.Public())
+}
+
+func (w *Web) llmSet(rw http.ResponseWriter, r *http.Request) {
+	if w.LLM == nil {
+		fail(rw, 404, fmt.Errorf("LLM support disabled"))
+		return
+	}
+	var in struct {
+		URL      string `json:"url"`
+		Model    string `json:"model"`
+		Key      string `json:"key"`
+		ClearKey bool   `json:"clearKey"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		fail(rw, 400, err)
+		return
+	}
+	if err := w.LLM.Set(in.URL, in.Model, in.Key, in.ClearKey); err != nil {
+		fail(rw, 400, err)
+		return
+	}
+	writeJSON(rw, 200, w.LLM.Public())
+}
+
+// knownPrograms lists process paths the user already has rules or traffic for.
+func (w *Web) knownPrograms() []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	for _, r := range w.Hub.Rules() {
+		for _, l := range flatten(opToJSON(r.Operator)) {
+			if l.Operand == "process.path" && l.Type == "simple" {
+				add(l.Data)
+			}
+		}
+	}
+	for _, e := range w.Hub.Log() {
+		add(e.Process)
+	}
+	return out
+}
+
+func (w *Web) llmPropose(rw http.ResponseWriter, r *http.Request) {
+	if w.LLM == nil {
+		fail(rw, 404, fmt.Errorf("LLM support disabled"))
+		return
+	}
+	var in struct {
+		Text string `json:"text"`
+	}
+	if err := readJSON(r, &in); err != nil {
+		fail(rw, 400, err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	p, err := w.LLM.Propose(ctx, in.Text, w.knownPrograms())
+	if err != nil {
+		fail(rw, 502, err)
+		return
+	}
+	writeJSON(rw, 200, p)
 }

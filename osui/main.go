@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"osui/internal/hub"
+	"osui/internal/llm"
 	pb "osui/internal/pb"
 	"osui/internal/server"
 	"osui/internal/web"
@@ -56,6 +57,7 @@ func main() {
 	defer g.Stop()
 
 	w := web.New(h, token, *listen)
+	w.LLM = llm.Load()
 	hs := &http.Server{Addr: *listen, Handler: w.Handler(), ReadHeaderTimeout: 10 * time.Second}
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {

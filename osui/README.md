@@ -41,6 +41,16 @@ This is the tab for "let `curl` reach only these sites".
 
 Broad allow rules are flagged in the **Rules** tab, with a **Restrict…** button that jumps to the allowlist for that program.
 
+### Describe it in plain English (optional)
+On the Allowlists tab, point osui at any **OpenAI-compatible** chat endpoint (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, vLLM, OpenAI…), then type something like *"let curl reach github.com and anything under anthropic.com, block everything else"*.
+
+The model only **proposes**: it fills a fixed schema (program, destinations, port, subdomains, block-rest) that is validated on the server and again in the browser, and shown as a preview. Nothing changes until you click **Apply**. It can only propose allow entries.
+
+- osui calls the endpoint from the backend, so the API key never reaches the browser. It is stored in `~/.config/osui/llm.json` (mode 0600); `OSUI_LLM_KEY` overrides it and is never written to disk.
+- The model sees only your typed text and program paths you already have rules or traffic for (paths with unusual characters are filtered out, since process paths come from untrusted software).
+- If the endpoint is not on this machine, the UI warns that your text and those program names leave it.
+- osui itself makes the outbound request, so OpenSnitch will ask about the `osui` binary connecting to the endpoint.
+
 ### Rules and Connections
 - **Rules**: search, filter by action or risk (`broad` = no destination restriction), enable/disable, bulk delete, and a JSON editor.
 - **Connections**: recent traffic reported by the daemon. **Rule from this** opens a prefilled narrow rule.
@@ -73,7 +83,7 @@ The gRPC socket is created with mode `0600`. `osui` refuses to start if another 
 ## Development
 
 ```sh
-go test -race ./...               # e2e tests: fake daemon over gRPC + HTTP handler in-process
+go test -race ./...               # fake daemon over gRPC, HTTP handler in-process, LLM client with a fake transport
 node test/ui_logic.test.mjs       # allowlist/scope logic, no browser needed
 go run ./cmd/fakedaemon           # sample prompts for a manually started `osui --socket unix:///tmp/osui-demo.sock`
 ```
@@ -85,6 +95,7 @@ main.go                   flags, token, wiring
 internal/server           gRPC UI service the daemon talks to
 internal/hub              shared state: prompts, rules cache, notifications to the daemon
 internal/web              HTTP API, auth, rule validation/risk, embedded static UI
+internal/llm              OpenAI-compatible client that turns text into a validated allowlist proposal
 internal/pb, proto/       generated from OpenSnitch's ui.proto (v1.7.2)
 cmd/fakedaemon            pretend daemon for demos
 ```

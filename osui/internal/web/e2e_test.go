@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"osui/internal/hub"
+	"osui/internal/llm"
 	pb "osui/internal/pb"
 	"osui/internal/server"
 	"osui/internal/web"
@@ -271,5 +273,39 @@ func TestAuth(t *testing.T) {
 	// static page served with the cookie
 	if resp, body := e.do("GET", "/", nil, nil); resp.StatusCode != 200 || !bytes.Contains(body, []byte("osui")) {
 		t.Errorf("index: %d", resp.StatusCode)
+	}
+}
+
+type fakeLLM func(*http.Request) (*http.Response, error)
+
+func (f fakeLLM) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestLLMProposeEndpoint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OSUI_LLM_KEY", "")
+	h := hub.New()
+	w := web.New(h, token, "127.0.0.1:8899")
+	w.LLM = llm.Load()
+	w.LLM.HTTP = &http.Client{Transport: fakeLLM(func(r *http.Request) (*http.Response, error) {
+		b, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": `{"intents":[{"program":"/usr/bin/curl","destinations":["github.com"],"port":"","include_subdomains":true,"block_rest":true}]}`}}}})
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+	})}
+	e := &env{t: t, hub: h, h: w.Handler(), port: "8899", origin: "http://127.0.0.1:8899"}
+
+	if resp, _ := e.do("POST", "/api/llm/propose", map[string]string{"text": "curl github only"}, nil); resp.StatusCode != 502 {
+		t.Errorf("unconfigured: want 502 got %d", resp.StatusCode)
+	}
+	if resp, body := e.do("POST", "/api/llm", map[string]any{"url": "http://llm.test/v1", "model": "m", "key": "k"}, nil); resp.StatusCode != 200 || bytes.Contains(body, []byte(`"k"`)) {
+		t.Fatalf("set: %d %s", resp.StatusCode, body)
+	}
+	resp, body := e.do("POST", "/api/llm/propose", map[string]string{"text": "curl github only"}, nil)
+	if resp.StatusCode != 200 || !bytes.Contains(body, []byte("github.com")) {
+		t.Fatalf("propose: %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := e.do("POST", "/api/llm", map[string]any{"url": "file:///etc/passwd", "model": "m"}, nil); resp.StatusCode != 400 {
+		t.Errorf("bad url: want 400 got %d", resp.StatusCode)
+	}
+	if resp, _ := e.do("POST", "/api/llm/propose", map[string]string{"text": "x"}, func(r *http.Request) { r.Header.Set("Origin", "http://evil.example") }); resp.StatusCode != 403 {
+		t.Errorf("cross-origin propose: want 403 got %d", resp.StatusCode)
 	}
 }

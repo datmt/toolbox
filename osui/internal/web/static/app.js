@@ -16,7 +16,7 @@ function h(tag, attrs, ...kids) {
 }
 
 const S = { status: {}, rules: [], prompts: [], log: [], tab: 'prompts',
-            alProg: '', sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
+            alProg: '', askText: '', proposal: null, llm: null, llmOpen: false, sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
 
 // ---------- api ----------
 async function api(method, path, body) {
@@ -298,12 +298,88 @@ async function addEntries(prog, text, port, subdomains) {
   toast(`Added ${parsed.length} entr${parsed.length === 1 ? 'y' : 'ies'}`);
 }
 
+const putDeny = prog => api('POST', '/api/rules', { name: denyName(prog), description: 'osui allowlist: block everything else',
+  enabled: true, precedence: false, nolog: false, action: 'deny', duration: 'always', operator: simple('process.path', prog) });
+
+// ---------- natural-language helper (user-configured LLM endpoint) ----------
+// The model only PROPOSES. Everything is re-validated here, shown as a preview,
+// and applied only when the user clicks Apply.
+async function loadLLM() { try { S.llm = await api('GET', '/api/llm'); } catch { S.llm = null; } }
+
+function describeIntent(i) {
+  const parsed = [], problems = [];
+  for (const d of i.destinations) { try { const e = parseEntry(d, i.include_subdomains); if (e) parsed.push(e); } catch (err) { problems.push(err.message); } }
+  return { parsed, problems };
+}
+
+function llmCard() {
+  const L = S.llm || {};
+  const configured = !!(L.url && L.model);
+  const urlIn = h('input', { type: 'text', id: 'llmUrl', size: 38, value: L.url || '', placeholder: 'http://127.0.0.1:11434/v1' });
+  const modelIn = h('input', { type: 'text', id: 'llmModel', size: 18, value: L.model || '', placeholder: 'model name' });
+  const keyIn = h('input', { type: 'password', id: 'llmKey', size: 18, placeholder: L.hasKey ? '(key saved — leave blank to keep)' : 'API key (optional)', autocomplete: 'off' });
+  const save = guard(async clear => {
+    S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true });
+    keyIn.value = ''; toast('LLM endpoint saved'); renderAllow();
+  });
+  const ta = h('textarea', { id: 'askText', rows: 2, placeholder: 'e.g. let curl reach github.com and anything under anthropic.com, block everything else',
+    oninput: e => { S.askText = e.target.value; }, style: 'width:100%' }, S.askText);
+  const propose = guard(async () => {
+    btn.disabled = true; btn.textContent = 'Thinking…';
+    try { S.proposal = await api('POST', '/api/llm/propose', { text: S.askText }); }
+    finally { renderAllow(); }
+  });
+  const btn = h('button', { class: 'primary', disabled: !configured, onclick: propose }, 'Propose rules');
+
+  return h('div', { class: 'card' },
+    h('div', { class: 'row' }, h('b', {}, 'Describe what you want'),
+      h('span', { class: 'muted' }, configured ? `${L.model} @ ${L.url}` : 'no LLM endpoint configured'),
+      h('button', { class: 'small', style: 'margin-left:auto', onclick: () => { S.llmOpen = !S.llmOpen; renderAllow(); } }, S.llmOpen || !configured ? 'Hide settings' : 'LLM settings')),
+    S.llmOpen || !configured ? h('div', { style: 'margin:10px 0' },
+      h('div', { class: 'row' }, urlIn, modelIn, keyIn,
+        h('button', { class: 'small', onclick: () => save(false) }, 'Save'),
+        L.hasKey ? h('button', { class: 'small danger', onclick: () => save(true) }, 'Remove key') : null),
+      h('p', { class: 'muted' }, 'Any OpenAI-compatible endpoint (Ollama: http://127.0.0.1:11434/v1, llama.cpp, vLLM, OpenAI…). The key is stored in ~/.config/osui/llm.json (mode 0600) and never sent back to the browser; OSUI_LLM_KEY overrides it.'),
+      configured && !L.loopback ? h('p', { class: 'err' }, 'This endpoint is not on this machine: your request text and the names of programs you have rules for are sent to it.') : null) : null,
+    ta,
+    h('div', { class: 'row', style: 'margin-top:8px' }, btn, h('span', { class: 'muted' }, 'Only proposes allow entries. You review everything before it is applied.')),
+    S.proposal ? proposalView(S.proposal) : null);
+}
+
+function proposalView(p) {
+  const rows = p.intents.map(i => ({ i, ...describeIntent(i) })).filter(r => r.parsed.length);
+  const known = new Set(knownProgs());
+  const apply = guard(async () => {
+    for (const r of rows) {
+      await addEntries(r.i.program, r.parsed.map(e => e.text).join(' '), r.i.port, r.i.include_subdomains);
+      if (r.i.block_rest) await putDeny(r.i.program);
+    }
+    S.alProg = rows[0].i.program; S.proposal = null; S.askText = ''; renderAllow();
+  });
+  return h('div', { style: 'margin-top:12px; border-top:1px solid var(--line); padding-top:12px' },
+    p.note ? h('p', { class: 'muted' }, 'Model note: ' + p.note) : null,
+    rows.length ? [
+      h('b', {}, 'Proposed changes (nothing applied yet):'),
+      rows.map(r => h('div', { style: 'margin:8px 0' },
+        h('div', {}, h('span', { class: 'mono' }, r.i.program), ' may reach' + (r.i.port ? ` port ${r.i.port} of` : ':')),
+        h('ul', {}, r.parsed.map(e => h('li', { class: 'mono' }, e.text))),
+        r.i.block_rest ? h('div', { class: 'tag medium' }, 'then block everything else for this program') : null,
+        !known.has(r.i.program) ? h('div', { class: 'err' }, 'You have no rules or traffic for this program yet — check the path.') : null,
+        r.problems.length ? h('div', { class: 'err' }, 'Skipped: ' + r.problems.join('; ')) : null)),
+      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: apply }, 'Apply'),
+        h('button', { class: 'ghost', onclick: () => { S.proposal = null; renderAllow(); } }, 'Discard'))]
+      : [h('p', {}, 'The model did not propose any usable entries. Try rephrasing, or use the form below.'),
+         h('button', { class: 'ghost', onclick: () => { S.proposal = null; renderAllow(); } }, 'Dismiss')]);
+}
+
 function renderAllow() {
   const root = $('#tab-allow');
-  if (root.contains(document.activeElement) && document.activeElement.tagName === 'INPUT' && document.activeElement.type === 'text' && document.activeElement.value) return; // don't wipe typing
+  const ae = document.activeElement;
+  if (root.contains(ae) && ((ae.tagName === 'INPUT' && ae.type !== 'checkbox' && ae.value) || (ae.tagName === 'TEXTAREA' && ae.value))) return; // don't wipe typing
   const progs = knownProgs();
   const prog = S.alProg;
   const kids = [
+    llmCard(),
     h('p', { class: 'muted' }, 'Pick a program, list the domains / IPs / networks it may reach, then turn on "block everything else". ',
       'Each entry becomes one allow rule; blocking creates one deny rule for that program.'),
     h('div', { class: 'toolbar' },
@@ -330,8 +406,7 @@ function renderAllow() {
     onchange: guard(async e => {
       if (e.target.checked) {
         if (!entries.length && !confirm(`The list is empty: this will block ALL network access for ${prog}. Continue?`)) { e.target.checked = false; return; }
-        await api('POST', '/api/rules', { name: denyName(prog), description: 'osui allowlist: block everything else', enabled: true, precedence: false, nolog: false,
-          action: 'deny', duration: 'always', operator: simple('process.path', prog) });
+        await putDeny(prog);
         toast(`${base(prog)} can now reach only the listed destinations`);
       } else if (deny) {
         await api('DELETE', `/api/rules/${encodeURIComponent(deny.name)}`);
@@ -415,6 +490,7 @@ function onPromptNew(p) {
 async function boot() {
   const st = await api('GET', '/api/state');
   Object.assign(S, { status: st.status, rules: st.rules, prompts: st.prompts, log: st.log || [] });
+  await loadLLM();
   render();
   if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
 
