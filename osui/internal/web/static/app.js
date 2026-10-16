@@ -16,7 +16,7 @@ function h(tag, attrs, ...kids) {
 }
 
 const S = { status: {}, rules: [], prompts: [], log: [], tab: 'prompts',
-            sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
+            alProg: '', sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
 
 // ---------- api ----------
 async function api(method, path, body) {
@@ -79,6 +79,7 @@ function summarize(o) {
 function render() {
   renderHeader();
   if (S.tab === 'prompts') renderPrompts();
+  if (S.tab === 'allow') renderAllow();
   if (S.tab === 'rules') renderRules();
   if (S.tab === 'log') renderLog();
 }
@@ -211,6 +212,7 @@ function ruleRow(r) {
     h('td', { class: 'mono' }, summarize(r.operator)),
     h('td', {}, r.risk ? h('span', { class: 'tag ' + r.risk, title: r.riskWhy }, r.risk) : ''),
     h('td', { class: 'actions' },
+      r.risk === 'broad' && procOf(r) ? [h('button', { class: 'small', onclick: () => gotoAllow(procOf(r)) }, 'Restrict…'), ' '] : null,
       h('button', { class: 'small', onclick: () => openEditor(r) }, 'Edit'), ' ',
       h('button', { class: 'small danger', onclick: guard(async () => { if (confirm(`Delete ${r.name}?`)) await api('DELETE', `/api/rules/${encodeURIComponent(r.name)}`); }) }, 'Delete')));
 }
@@ -233,6 +235,134 @@ function renderLog() {
         h('td', { class: 'mono' }, e.rule),
         h('td', { class: 'actions' }, e.process ? h('button', { class: 'small', onclick: () => ruleFromLog(e) }, 'Rule from this') : ''))))));
   if (hadFocus) { const i = $('#logSearch'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }
+}
+
+
+// ---------- allowlists ----------
+// One allow rule per entry (process + destination), plus one optional
+// "deny rest" rule per program. Allow rules use precedence so they win.
+const pk = prog => prog.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
+// The daemon walks rules in name order and returns the first Deny or Precedence
+// match, so allow entries ("-a-") must sort before the deny rule ("-z-").
+const denyName = prog => `wl-${pk(prog)}-z-deny-rest`;
+const entryName = (prog, tail, port) => `wl-${pk(prog)}-a-${tail}${port ? '-' + port : ''}`.slice(0, 190);
+const procOf = r => { const l = leaves(r.operator).find(x => x.operand === 'process.path' && x.type === 'simple'); return l ? l.data : ''; };
+const isWl = (r, prog) => r.name.startsWith(`wl-${pk(prog)}-`) && procOf(r) === prog;
+
+function knownProgs() {
+  const s = new Set();
+  S.rules.forEach(r => { const p = procOf(r); if (p) s.add(p); });
+  S.log.forEach(e => e.process && s.add(e.process));
+  S.prompts.forEach(p => p.conn.path && s.add(p.conn.path));
+  return [...s].sort();
+}
+
+function gotoAllow(prog) {
+  S.alProg = prog;
+  $('#tabs button[data-tab=allow]').click();
+}
+
+const IPV4 = /^\d{1,3}(\.\d{1,3}){3}$/;
+const IPV6 = /^[0-9a-f:]*:[0-9a-f:]*$/i;
+const DOMAIN = /^([a-z0-9-]+\.)+[a-z]{2,}$/;
+function parseEntry(raw, subdomains) {
+  let t = raw.trim().toLowerCase();
+  if (!t) return null;
+  if (t.includes('/')) {
+    const [ip, bits] = t.split('/');
+    if (!(IPV4.test(ip) && +bits >= 0 && +bits <= 32) && !(IPV6.test(ip) && +bits >= 0 && +bits <= 128)) throw new Error(`bad network "${raw}"`);
+    return { text: t, tail: t.replace(/[^a-z0-9]+/g, '-'), op: { type: 'network', operand: 'dest.network', data: t, sensitive: false } };
+  }
+  if (IPV4.test(t) || IPV6.test(t)) {
+    if (IPV4.test(t) && t.split('.').some(n => +n > 255)) throw new Error(`bad IP "${raw}"`);
+    return { text: t, tail: t.replace(/[^a-z0-9]+/g, '-'), op: simple('dest.ip', t) };
+  }
+  const wild = t.startsWith('*.') || t.startsWith('.');
+  t = t.replace(/^\*?\./, '');
+  if (!DOMAIN.test(t)) throw new Error(`"${raw}" is not a domain, IP or CIDR`);
+  const sub = subdomains || wild;
+  return { text: (sub ? '*.' : '') + t, tail: sub ? t : t + '-exact', op: sub ? { type: 'regexp', operand: 'dest.host', data: '^(.*\\.)?' + esc(t) + '$', sensitive: false } : simple('dest.host', t) };
+}
+
+async function addEntries(prog, text, port, subdomains) {
+  const parts = text.split(/[\s,;]+/).filter(Boolean);
+  if (!parts.length) throw new Error('enter at least one domain, IP or CIDR');
+  if (port && !(/^\d{1,5}$/.test(port) && +port > 0 && +port < 65536)) throw new Error('bad port');
+  const parsed = parts.map(x => parseEntry(x, subdomains));          // validate all before sending any
+  for (const e of parsed) {
+    const ops = [simple('process.path', prog), e.op, port ? simple('dest.port', port) : null].filter(Boolean);
+    await api('POST', '/api/rules', { name: entryName(prog, e.tail, port),
+      description: `osui allowlist: ${e.text}${port ? ':' + port : ''}`, enabled: true, precedence: true, nolog: false,
+      action: 'allow', duration: 'always', operator: all(ops) });
+  }
+  toast(`Added ${parsed.length} entr${parsed.length === 1 ? 'y' : 'ies'}`);
+}
+
+function renderAllow() {
+  const root = $('#tab-allow');
+  if (root.contains(document.activeElement) && document.activeElement.tagName === 'INPUT' && document.activeElement.type === 'text' && document.activeElement.value) return; // don't wipe typing
+  const progs = knownProgs();
+  const prog = S.alProg;
+  const kids = [
+    h('p', { class: 'muted' }, 'Pick a program, list the domains / IPs / networks it may reach, then turn on "block everything else". ',
+      'Each entry becomes one allow rule; blocking creates one deny rule for that program.'),
+    h('div', { class: 'toolbar' },
+      h('select', { onchange: e => { S.alProg = e.target.value; renderAllow(); } },
+        h('option', { value: '' }, '— choose a program —'),
+        (progs.includes(prog) || !prog ? progs : [prog, ...progs]).map(p => h('option', { value: p, selected: p === prog }, p))),
+      h('input', { type: 'text', id: 'alCustom', placeholder: 'or type a path, e.g. /usr/bin/curl', size: 34,
+        onkeydown: e => { if (e.key === 'Enter' && e.target.value.trim().startsWith('/')) { S.alProg = e.target.value.trim(); renderAllow(); } } }),
+      h('button', { class: 'ghost', onclick: () => { const v = $('#alCustom').value.trim(); if (!v.startsWith('/')) return toast('path must be absolute'); S.alProg = v; renderAllow(); } }, 'Use path'))];
+
+  if (!prog) { kids.push(h('div', { class: 'empty' }, 'Choose a program above (or use "Restrict…" on a broad rule in the Rules tab).')); root.replaceChildren(...kids); return; }
+
+  const entries = S.rules.filter(r => isWl(r, prog) && r.name !== denyName(prog)).sort((a, b) => a.name.localeCompare(b.name));
+  const deny = S.rules.find(r => r.name === denyName(prog));
+  const broad = S.rules.filter(r => r.risk === 'broad' && r.enabled && procOf(r) === prog);
+
+  if (broad.length) kids.push(h('div', { class: 'card', style: 'border-color:var(--deny)' },
+    h('b', {}, `${broad.length} existing rule(s) already allow ${base(prog)} to reach anything: `), broad.map(r => h('span', { class: 'mono' }, r.name + ' ')),
+    h('div', { class: 'row', style: 'margin-top:8px' },
+      h('button', { class: 'small', onclick: guard(async () => { for (const r of broad) await api('POST', `/api/rules/${encodeURIComponent(r.name)}/disable`); toast('Disabled — the allowlist now applies'); }) }, 'Disable them'),
+      h('span', { class: 'muted' }, 'Needed, otherwise the allowlist is bypassed.'))));
+
+  const blockSw = h('input', { type: 'checkbox', class: 'sw', checked: !!deny && deny.enabled,
+    onchange: guard(async e => {
+      if (e.target.checked) {
+        if (!entries.length && !confirm(`The list is empty: this will block ALL network access for ${prog}. Continue?`)) { e.target.checked = false; return; }
+        await api('POST', '/api/rules', { name: denyName(prog), description: 'osui allowlist: block everything else', enabled: true, precedence: false, nolog: false,
+          action: 'deny', duration: 'always', operator: simple('process.path', prog) });
+        toast(`${base(prog)} can now reach only the listed destinations`);
+      } else if (deny) {
+        await api('DELETE', `/api/rules/${encodeURIComponent(deny.name)}`);
+        toast('Deny rule removed');
+      }
+    }) });
+
+  kids.push(h('div', { class: 'card' },
+    h('div', { class: 'row' }, h('b', {}, base(prog)), h('span', { class: 'muted mono' }, prog)),
+    h('div', { class: 'row', style: 'margin:10px 0' }, blockSw, h('span', {}, 'Block everything else for this program'),
+      deny ? h('span', { class: 'tag narrow' }, 'enforced') : h('span', { class: 'tag medium' }, 'not enforced: only the allow rules below exist')),
+    h('div', { class: 'row' },
+      h('input', { type: 'text', id: 'alText', placeholder: 'github.com, *.example.org, 93.184.216.34, 10.0.0.0/8', size: 52,
+        onkeydown: e => { if (e.key === 'Enter') $('#alAdd').click(); } }),
+      h('input', { type: 'text', id: 'alPort', placeholder: 'port (optional)', size: 12 }),
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', id: 'alSub', checked: true }), 'include subdomains'),
+      h('button', { id: 'alAdd', class: 'primary', onclick: guard(async () => {
+        await addEntries(prog, $('#alText').value, $('#alPort').value.trim(), $('#alSub').checked);
+        $('#alText').value = ''; $('#alPort').value = ''; renderAllow();
+      }) }, 'Add')),
+    h('p', { class: 'muted' }, 'Domains match the hostname from the DNS lookup; with DoH or hardcoded IPs the hostname is unknown, so add the IP instead.')));
+
+  kids.push(entries.length
+    ? h('table', {}, h('thead', {}, h('tr', {}, ['On', 'Allowed destination', 'Rule', ''].map(t => h('th', {}, t)))),
+        h('tbody', {}, entries.map(r => h('tr', { class: r.enabled ? '' : 'off' },
+          h('td', {}, h('input', { type: 'checkbox', class: 'sw', checked: r.enabled, onchange: guard(async e => { await api('POST', `/api/rules/${encodeURIComponent(r.name)}/${e.target.checked ? 'enable' : 'disable'}`); }) })),
+          h('td', { class: 'mono' }, (r.description || '').replace(/^osui allowlist: /, '') || summarize(r.operator)),
+          h('td', { class: 'mono muted' }, r.name),
+          h('td', { class: 'actions' }, h('button', { class: 'small danger', onclick: guard(async () => { await api('DELETE', `/api/rules/${encodeURIComponent(r.name)}`); }) }, 'Remove'))))))
+    : h('div', { class: 'empty' }, 'No allowed destinations yet for this program.'));
+  root.replaceChildren(...kids);
 }
 
 // ---------- rule editor ----------
@@ -271,7 +401,7 @@ $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   S.tab = b.dataset.tab;
   document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x === b));
-  for (const t of ['prompts', 'rules', 'log']) $('#tab-' + t).classList.toggle('hidden', t !== S.tab);
+  for (const t of ['prompts', 'allow', 'rules', 'log']) $('#tab-' + t).classList.toggle('hidden', t !== S.tab);
   render();
 });
 
@@ -290,7 +420,7 @@ async function boot() {
 
   const es = new EventSource('/api/events');
   es.addEventListener('status', e => { S.status = JSON.parse(e.data); renderHeader(); });
-  es.addEventListener('rules', e => { S.rules = JSON.parse(e.data); if (S.tab === 'rules') renderRules(); renderHeader(); });
+  es.addEventListener('rules', e => { S.rules = JSON.parse(e.data); if (S.tab === 'rules') renderRules(); if (S.tab === 'allow') renderAllow(); renderHeader(); });
   es.addEventListener('prompt', e => onPromptNew(JSON.parse(e.data)));
   es.addEventListener('prompt_gone', e => { const id = JSON.parse(e.data); S.prompts = S.prompts.filter(p => p.id !== id); delete S.choice[id]; render(); });
   es.addEventListener('log', e => { S.log.push(...JSON.parse(e.data)); if (S.log.length > 1000) S.log = S.log.slice(-1000); if (S.tab === 'log') renderLog(); });

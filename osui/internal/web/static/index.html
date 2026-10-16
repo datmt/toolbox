@@ -11,6 +11,7 @@
   <div class="brand">osui <span id="conn" class="dot off" title="daemon connection"></span><span id="connText" class="muted">waiting for daemon…</span></div>
   <nav id="tabs">
     <button data-tab="prompts" class="active">Prompts <span id="promptBadge" class="badge hidden">0</span></button>
+    <button data-tab="allow">Allowlists</button>
     <button data-tab="rules">Rules <span id="ruleCount" class="muted"></span></button>
     <button data-tab="log">Connections</button>
   </nav>
@@ -19,6 +20,7 @@
 
 <main>
   <section id="tab-prompts"></section>
+  <section id="tab-allow" class="hidden"></section>
   <section id="tab-rules" class="hidden"></section>
   <section id="tab-log" class="hidden"></section>
 </main>
