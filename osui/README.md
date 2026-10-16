@@ -16,6 +16,7 @@ Requires Go and a running `opensnitchd`.
 ```sh
 ./run.sh              # build if needed, stop opensnitch-ui if running, start osui, print the URL
 ./run.sh --keep-ui    # refuse to start while opensnitch-ui is running
+./run.sh --restart    # restart osui (also happens automatically after a rebuild)
 ./run.sh demo         # fake daemon fires sample prompts; the real firewall is untouched
 ```
 
@@ -42,7 +43,7 @@ This is the tab for "let `curl` reach only these sites".
 Broad allow rules are flagged in the **Rules** tab, with a **Restrict…** button that jumps to the allowlist for that program.
 
 ### Describe it in plain English (optional)
-On the Allowlists tab, point osui at any **OpenAI-compatible** chat endpoint (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, vLLM, OpenAI…), then type something like *"let curl reach github.com and anything under anthropic.com, block everything else"*.
+Open the **Settings** tab and enter the endpoint (base URL, model, optional key; **Save & test** checks it). It can be any **OpenAI-compatible** chat endpoint (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, vLLM, OpenAI…), then, on the Allowlists tab, type something like *"let curl reach github.com and anything under anthropic.com, block everything else"*.
 
 The model only **proposes**: it fills a fixed schema (program, destinations, port, subdomains, block-rest) that is validated on the server and again in the browser, and shown as a preview. Nothing changes until you click **Apply**. It can only propose allow entries.
 

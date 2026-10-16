@@ -5,6 +5,8 @@
 #                         Stops opensnitch-ui if it is running; if osui is already
 #                         running, just prints its URL.
 #   ./run.sh --keep-ui    refuse to start while opensnitch-ui is running
+#   ./run.sh --restart    restart osui even if it is up to date (it also restarts
+#                         automatically when the binary was rebuilt)
 #   ./run.sh demo         run with a fake daemon that fires sample prompts;
 #                         never touches the real firewall
 #
@@ -14,11 +16,13 @@ cd "$(dirname "$(readlink -f "$0")")"
 
 mode=real
 keep_ui=0
+restart=0
 for a in "$@"; do
   case "$a" in
     demo) mode=demo ;;
     --keep-ui) keep_ui=1 ;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0 ;;
+    --restart) restart=1 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown argument: $a (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -56,12 +60,21 @@ listen=${OSUI_LISTEN:-127.0.0.1:8899}
 cfg=${XDG_CONFIG_HOME:-$HOME/.config}/osui/token
 url() { echo "http://$listen/?token=$(cat "$cfg" 2>/dev/null)"; }
 
-# Already running: nothing to start, just show where it is.
+# Already running with the current binary: just show where it is. If the binary
+# was rebuilt since that process started (or --restart), restart it.
 if running=$(pgrep -f '^\./osui --socket unix:///tmp/osui\.sock'); then
-  echo "osui is already running (pid $running)."
-  echo
-  echo "Open the UI:  $(url)"
-  exit 0
+  stale=0
+  [[ $(stat -c %Y osui) -gt $(stat -c %Y "/proc/$running") ]] && stale=1
+  if (( stale || restart )); then
+    if (( stale )); then echo "restarting osui (pid $running): it is running an older build."; else echo "restarting osui (pid $running)."; fi
+    kill $running
+    for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$running" 2>/dev/null || break; sleep 0.3; done
+  else
+    echo "osui is already running (pid $running)."
+    echo
+    echo "Open the UI:  $(url)"
+    exit 0
+  fi
 fi
 
 ui_pids=$(pgrep -f '^/usr/bin/python.*opensnitch-ui' || true)

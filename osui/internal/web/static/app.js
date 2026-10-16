@@ -82,6 +82,7 @@ function render() {
   if (S.tab === 'allow') renderAllow();
   if (S.tab === 'rules') renderRules();
   if (S.tab === 'log') renderLog();
+  if (S.tab === 'settings') renderSettings();
 }
 
 function renderHeader() {
@@ -315,13 +316,6 @@ function describeIntent(i) {
 function llmCard() {
   const L = S.llm || {};
   const configured = !!(L.url && L.model);
-  const urlIn = h('input', { type: 'text', id: 'llmUrl', size: 38, value: L.url || '', placeholder: 'http://127.0.0.1:11434/v1' });
-  const modelIn = h('input', { type: 'text', id: 'llmModel', size: 18, value: L.model || '', placeholder: 'model name' });
-  const keyIn = h('input', { type: 'password', id: 'llmKey', size: 18, placeholder: L.hasKey ? '(key saved — leave blank to keep)' : 'API key (optional)', autocomplete: 'off' });
-  const save = guard(async clear => {
-    S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true });
-    keyIn.value = ''; toast('LLM endpoint saved'); renderAllow();
-  });
   const ta = h('textarea', { id: 'askText', rows: 2, placeholder: 'e.g. let curl reach github.com and anything under anthropic.com, block everything else',
     oninput: e => { S.askText = e.target.value; }, style: 'width:100%' }, S.askText);
   const propose = guard(async () => {
@@ -330,20 +324,57 @@ function llmCard() {
     finally { renderAllow(); }
   });
   const btn = h('button', { class: 'primary', disabled: !configured, onclick: propose }, 'Propose rules');
-
   return h('div', { class: 'card' },
     h('div', { class: 'row' }, h('b', {}, 'Describe what you want'),
-      h('span', { class: 'muted' }, configured ? `${L.model} @ ${L.url}` : 'no LLM endpoint configured'),
-      h('button', { class: 'small', style: 'margin-left:auto', onclick: () => { S.llmOpen = !S.llmOpen; renderAllow(); } }, S.llmOpen || !configured ? 'Hide settings' : 'LLM settings')),
-    S.llmOpen || !configured ? h('div', { style: 'margin:10px 0' },
-      h('div', { class: 'row' }, urlIn, modelIn, keyIn,
-        h('button', { class: 'small', onclick: () => save(false) }, 'Save'),
-        L.hasKey ? h('button', { class: 'small danger', onclick: () => save(true) }, 'Remove key') : null),
-      h('p', { class: 'muted' }, 'Any OpenAI-compatible endpoint (Ollama: http://127.0.0.1:11434/v1, llama.cpp, vLLM, OpenAI…). The key is stored in ~/.config/osui/llm.json (mode 0600) and never sent back to the browser; OSUI_LLM_KEY overrides it.'),
-      configured && !L.loopback ? h('p', { class: 'err' }, 'This endpoint is not on this machine: your request text and the names of programs you have rules for are sent to it.') : null) : null,
+      configured ? h('span', { class: 'muted' }, `${L.model} @ ${L.url}`) : h('span', { class: 'muted' }, 'needs an LLM endpoint'),
+      h('button', { class: configured ? 'small' : 'primary', style: 'margin-left:auto', onclick: () => $('#tabs button[data-tab=settings]').click() },
+        configured ? 'Change endpoint' : 'Set up LLM endpoint →')),
     ta,
     h('div', { class: 'row', style: 'margin-top:8px' }, btn, h('span', { class: 'muted' }, 'Only proposes allow entries. You review everything before it is applied.')),
     S.proposal ? proposalView(S.proposal) : null);
+}
+
+// ---------- settings tab ----------
+function renderSettings() {
+  const root = $('#tab-settings');
+  const ae = document.activeElement;
+  if (root.contains(ae) && ae.tagName === 'INPUT' && ae.value) return; // don't wipe typing
+  const L = S.llm || {};
+  const urlIn = h('input', { type: 'text', id: 'llmUrl', size: 44, value: L.url || '', placeholder: 'http://127.0.0.1:11434/v1' });
+  const modelIn = h('input', { type: 'text', id: 'llmModel', size: 26, value: L.model || '', placeholder: 'e.g. qwen2.5:7b' });
+  const keyIn = h('input', { type: 'password', id: 'llmKey', size: 26, autocomplete: 'off',
+    placeholder: L.hasKey ? 'key saved — leave blank to keep' : 'optional' });
+  const status = h('span', { class: 'muted', id: 'llmStatus' });
+  const save = async clear => {
+    S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true });
+    keyIn.value = '';
+  };
+  const preset = (url, model) => h('button', { class: 'small', onclick: () => { urlIn.value = url; if (model) modelIn.value = model; } }, url.includes('11434') ? 'Ollama' : url.includes('openai') ? 'OpenAI' : 'llama.cpp');
+  root.replaceChildren(
+    h('div', { class: 'card' },
+      h('h2', {}, 'LLM endpoint'),
+      h('p', { class: 'muted' }, 'Used by "Describe what you want" on the Allowlists tab. Any OpenAI-compatible chat endpoint works. The model only proposes rules; you review and apply them.'),
+      h('div', { class: 'row', style: 'margin:8px 0' }, h('span', { class: 'muted' }, 'Presets:'),
+        preset('http://127.0.0.1:11434/v1'), preset('http://127.0.0.1:8080/v1'), preset('https://api.openai.com/v1', 'gpt-4o-mini')),
+      h('dl', { class: 'kv', style: 'grid-template-columns:130px 1fr' },
+        h('dt', {}, 'Base URL'), h('dd', {}, urlIn),
+        h('dt', {}, 'Model'), h('dd', {}, modelIn),
+        h('dt', {}, 'API key'), h('dd', {}, keyIn)),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: guard(async () => { await save(false); toast('Saved'); renderSettings(); }) }, 'Save'),
+        h('button', { class: 'ghost', onclick: guard(async () => {
+          await save(false);
+          status.textContent = 'testing…';
+          try {
+            const r = await api('POST', '/api/llm/propose', { text: 'allow /usr/bin/curl to reach example.com' });
+            status.textContent = `OK — endpoint replied (${r.intents.length} proposal${r.intents.length === 1 ? '' : 's'}${r.note ? ', note: ' + r.note : ''})`;
+            status.className = 'tag narrow';
+          } catch (e) { status.textContent = 'Failed: ' + e.message; status.className = 'err'; }
+        }) }, 'Save & test'),
+        L.hasKey ? h('button', { class: 'small danger', onclick: guard(async () => { await save(true); toast('Key removed'); renderSettings(); }) }, 'Remove key') : null,
+        status),
+      L.url && !L.loopback ? h('p', { class: 'err' }, 'This endpoint is not on this machine: your request text and the names of programs you have rules for are sent to it.') : null,
+      h('p', { class: 'muted' }, 'The key is stored in ~/.config/osui/llm.json (mode 0600) and is never sent back to the browser. OSUI_LLM_KEY overrides it.')));
 }
 
 function proposalView(p) {
@@ -476,7 +507,7 @@ $('#tabs').addEventListener('click', e => {
   const b = e.target.closest('button'); if (!b) return;
   S.tab = b.dataset.tab;
   document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x === b));
-  for (const t of ['prompts', 'allow', 'rules', 'log']) $('#tab-' + t).classList.toggle('hidden', t !== S.tab);
+  for (const t of ['prompts', 'allow', 'rules', 'log', 'settings']) $('#tab-' + t).classList.toggle('hidden', t !== S.tab);
   render();
 });
 
