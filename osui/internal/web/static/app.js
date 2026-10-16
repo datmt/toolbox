@@ -16,7 +16,7 @@ function h(tag, attrs, ...kids) {
 }
 
 const S = { status: {}, rules: [], prompts: [], log: [], tab: 'prompts',
-            alProg: '', askText: '', proposal: null, llm: null, llmOpen: false, sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
+            alProg: '', chat: [], asking: false, llm: null, sel: new Set(), q: '', fAction: '', fRisk: '', logQ: '', choice: {} };
 
 // ---------- api ----------
 async function api(method, path, body) {
@@ -313,27 +313,6 @@ function describeIntent(i) {
   return { parsed, problems };
 }
 
-function llmCard() {
-  const L = S.llm || {};
-  const configured = !!(L.url && L.model);
-  const ta = h('textarea', { id: 'askText', rows: 2, placeholder: 'e.g. let curl reach github.com and anything under anthropic.com, block everything else',
-    oninput: e => { S.askText = e.target.value; }, style: 'width:100%' }, S.askText);
-  const propose = guard(async () => {
-    btn.disabled = true; btn.textContent = 'Thinking…';
-    try { S.proposal = await api('POST', '/api/llm/propose', { text: S.askText }); }
-    finally { renderAllow(); }
-  });
-  const btn = h('button', { class: 'primary', disabled: !configured, onclick: propose }, 'Propose rules');
-  return h('div', { class: 'card' },
-    h('div', { class: 'row' }, h('b', {}, 'Describe what you want'),
-      configured ? h('span', { class: 'muted' }, `${L.model} @ ${L.url}`) : h('span', { class: 'muted' }, 'needs an LLM endpoint'),
-      h('button', { class: configured ? 'small' : 'primary', style: 'margin-left:auto', onclick: () => $('#tabs button[data-tab=settings]').click() },
-        configured ? 'Change endpoint' : 'Set up LLM endpoint →')),
-    ta,
-    h('div', { class: 'row', style: 'margin-top:8px' }, btn, h('span', { class: 'muted' }, 'Only proposes allow entries. You review everything before it is applied.')),
-    S.proposal ? proposalView(S.proposal) : null);
-}
-
 // ---------- settings tab ----------
 function renderSettings() {
   const root = $('#tab-settings');
@@ -347,7 +326,7 @@ function renderSettings() {
   const status = h('span', { class: 'muted', id: 'llmStatus' });
   const save = async clear => {
     S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true });
-    keyIn.value = '';
+    keyIn.value = ''; renderChat();
   };
   const preset = (url, model) => h('button', { class: 'small', onclick: () => { urlIn.value = url; if (model) modelIn.value = model; } }, url.includes('11434') ? 'Ollama' : url.includes('openai') ? 'OpenAI' : 'llama.cpp');
   root.replaceChildren(
@@ -377,31 +356,86 @@ function renderSettings() {
       h('p', { class: 'muted' }, 'The key is stored in ~/.config/osui/llm.json (mode 0600) and is never sent back to the browser. OSUI_LLM_KEY overrides it.')));
 }
 
-function proposalView(p) {
+// ---------- assistant sidebar ----------
+function chatBubble(m) {
+  if (m.role === 'user') return h('div', { class: 'bubble user' }, m.text);
+  if (m.error) return h('div', { class: 'bubble bot' }, h('span', { class: 'err' }, m.error));
+  return h('div', { class: 'bubble bot' }, proposalView(m));
+}
+
+function proposalView(m) {
+  const p = m.proposal;
   const rows = p.intents.map(i => ({ i, ...describeIntent(i) })).filter(r => r.parsed.length);
   const known = new Set(knownProgs());
+  const done = m.state !== 'pending';
   const apply = guard(async () => {
     for (const r of rows) {
       await addEntries(r.i.program, r.parsed.map(e => e.text).join(' '), r.i.port, r.i.include_subdomains);
       if (r.i.block_rest) await putDeny(r.i.program);
     }
-    S.alProg = rows[0].i.program; S.proposal = null; S.askText = ''; renderAllow();
+    m.state = 'applied'; S.alProg = rows[0].i.program;
+    if (S.tab === 'allow') renderAllow();
+    renderChat();
   });
-  return h('div', { style: 'margin-top:12px; border-top:1px solid var(--line); padding-top:12px' },
-    p.note ? h('p', { class: 'muted' }, 'Model note: ' + p.note) : null,
-    rows.length ? [
-      h('b', {}, 'Proposed changes (nothing applied yet):'),
-      rows.map(r => h('div', { style: 'margin:8px 0' },
-        h('div', {}, h('span', { class: 'mono' }, r.i.program), ' may reach' + (r.i.port ? ` port ${r.i.port} of` : ':')),
-        h('ul', {}, r.parsed.map(e => h('li', { class: 'mono' }, e.text))),
-        r.i.block_rest ? h('div', { class: 'tag medium' }, 'then block everything else for this program') : null,
-        !known.has(r.i.program) ? h('div', { class: 'err' }, 'You have no rules or traffic for this program yet — check the path.') : null,
-        r.problems.length ? h('div', { class: 'err' }, 'Skipped: ' + r.problems.join('; ')) : null)),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: apply }, 'Apply'),
-        h('button', { class: 'ghost', onclick: () => { S.proposal = null; renderAllow(); } }, 'Discard'))]
-      : [h('p', {}, 'The model did not propose any usable entries. Try rephrasing, or use the form below.'),
-         h('button', { class: 'ghost', onclick: () => { S.proposal = null; renderAllow(); } }, 'Dismiss')]);
+  if (!rows.length) return h('div', {}, p.note ? h('p', {}, p.note) : null, 'I could not turn that into usable entries. Try rephrasing, or add them on the Allowlists tab.');
+  return h('div', {},
+    p.note ? h('p', { class: 'muted' }, p.note) : null,
+    h('b', {}, done ? (m.state === 'applied' ? 'Applied:' : 'Discarded:') : 'Proposed changes (nothing applied yet):'),
+    rows.map(r => h('div', { style: 'margin:6px 0' },
+      h('div', {}, h('span', { class: 'mono' }, r.i.program), ' may reach' + (r.i.port ? ` port ${r.i.port} of` : ':')),
+      h('ul', {}, r.parsed.map(e => h('li', { class: 'mono' }, e.text))),
+      r.i.block_rest ? h('div', { class: 'tag medium' }, 'then block everything else for this program') : null,
+      !done && !known.has(r.i.program) ? h('div', { class: 'err' }, 'No rules or traffic for this program yet — check the path.') : null,
+      r.problems.length ? h('div', { class: 'err' }, 'Skipped: ' + r.problems.join('; ')) : null)),
+    done
+      ? (m.state === 'applied' ? h('button', { class: 'small', onclick: () => { S.alProg = rows[0].i.program; showTab('allow'); } }, 'View in Allowlists') : null)
+      : h('div', { class: 'row' },
+          h('button', { class: 'primary', onclick: apply }, 'Apply'),
+          h('button', { class: 'ghost', onclick: () => { m.state = 'discarded'; renderChat(); } }, 'Discard')));
 }
+
+function renderChat() {
+  const L = S.llm || {};
+  const configured = !!(L.url && L.model);
+  const log = $('#chatLog');
+  log.replaceChildren(
+    !configured ? h('div', { class: 'bubble bot' }, 'No LLM endpoint is configured yet. ',
+      h('button', { class: 'small', onclick: () => showTab('settings') }, 'Open settings')) : null,
+    configured && !S.chat.length ? h('div', { class: 'muted' },
+      'Describe the rules you want, e.g. "let curl reach github.com and anything under anthropic.com, block everything else". ',
+      'I only propose allow entries; you review them and click Apply.') : null,
+    S.chat.map(chatBubble),
+    S.asking ? h('div', { class: 'bubble bot muted' }, 'Thinking…') : null);
+  log.scrollTop = log.scrollHeight;
+  $('#askSend').disabled = !configured || S.asking;
+  $('#askModel').textContent = configured ? L.model : '';
+  $('#askModel').title = configured ? `${L.model} @ ${L.url}` : '';
+}
+
+async function sendAsk() {
+  const ta = $('#askText');
+  const text = ta.value.trim();
+  if (!text || S.asking || !S.llm || !S.llm.url) return;
+  ta.value = '';
+  S.chat.push({ role: 'user', text });
+  S.asking = true; renderChat();
+  try { S.chat.push({ role: 'bot', proposal: await api('POST', '/api/llm/propose', { text }), state: 'pending' }); }
+  catch (e) { S.chat.push({ role: 'bot', error: e.message }); }
+  S.asking = false; renderChat();
+}
+
+function setAssistant(open) {
+  $('#assistant').classList.toggle('collapsed', !open);
+  $('#assistantToggle').classList.toggle('active-toggle', open);
+  $('#assistantToggle').setAttribute('aria-expanded', String(open));
+  try { localStorage.setItem('osui.assistant', open ? 'open' : 'closed'); } catch { /* storage unavailable */ }
+  if (open) { renderChat(); $('#askText').focus(); }
+}
+$('#assistantToggle').addEventListener('click', () => setAssistant($('#assistant').classList.contains('collapsed')));
+$('#assistantClose').addEventListener('click', () => setAssistant(false));
+$('#chatClear').addEventListener('click', () => { S.chat = []; renderChat(); });
+$('#askSend').addEventListener('click', sendAsk);
+$('#askText').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendAsk(); } });
 
 function renderAllow() {
   const root = $('#tab-allow');
@@ -410,7 +444,6 @@ function renderAllow() {
   const progs = knownProgs();
   const prog = S.alProg;
   const kids = [
-    llmCard(),
     h('p', { class: 'muted' }, 'Pick a program, list the domains / IPs / networks it may reach, then turn on "block everything else". ',
       'Each entry becomes one allow rule; blocking creates one deny rule for that program.'),
     h('div', { class: 'toolbar' },
@@ -503,13 +536,16 @@ $('#editorSave').addEventListener('click', async ev => {
 });
 
 // ---------- tabs / boot ----------
-$('#tabs').addEventListener('click', e => {
-  const b = e.target.closest('button'); if (!b) return;
-  S.tab = b.dataset.tab;
-  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x === b));
-  for (const t of ['prompts', 'allow', 'rules', 'log', 'settings']) $('#tab-' + t).classList.toggle('hidden', t !== S.tab);
+function showTab(t) {
+  S.tab = t;
+  document.querySelectorAll('#tabs button').forEach(x => x.classList.toggle('active', x.dataset.tab === t));
+  $('#gear').classList.toggle('active-toggle', t === 'settings');
+  for (const x of ['prompts', 'allow', 'rules', 'log', 'settings']) $('#tab-' + x).classList.toggle('hidden', x !== t);
+  try { history.replaceState(null, '', t === 'prompts' ? location.pathname : '#' + t); } catch { /* ignore */ }
   render();
-});
+}
+$('#tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) showTab(b.dataset.tab); });
+$('#gear').addEventListener('click', () => showTab(S.tab === 'settings' ? 'prompts' : 'settings'));
 
 function onPromptNew(p) {
   if (!S.prompts.some(x => x.id === p.id)) S.prompts.push(p);
@@ -522,7 +558,11 @@ async function boot() {
   const st = await api('GET', '/api/state');
   Object.assign(S, { status: st.status, rules: st.rules, prompts: st.prompts, log: st.log || [] });
   await loadLLM();
-  render();
+  const hash = location.hash.slice(1);
+  if (['allow', 'rules', 'log', 'settings'].includes(hash)) showTab(hash); else render();
+  let open = false;
+  try { open = localStorage.getItem('osui.assistant') === 'open'; } catch { /* ignore */ }
+  setAssistant(open);
   if (window.Notification && Notification.permission === 'default') Notification.requestPermission();
 
   const es = new EventSource('/api/events');

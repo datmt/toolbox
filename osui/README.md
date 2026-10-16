@@ -43,7 +43,7 @@ This is the tab for "let `curl` reach only these sites".
 Broad allow rules are flagged in the **Rules** tab, with a **Restrict…** button that jumps to the allowlist for that program.
 
 ### Describe it in plain English (optional)
-Open the **Settings** tab and enter the endpoint (base URL, model, optional key; **Save & test** checks it). It can be any **OpenAI-compatible** chat endpoint (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, vLLM, OpenAI…), then, on the Allowlists tab, type something like *"let curl reach github.com and anything under anthropic.com, block everything else"*.
+Open **Settings** (the ⚙ icon in the header) and enter the endpoint (base URL, model, optional key; **Save & test** checks it). It can be any **OpenAI-compatible** chat endpoint (Ollama `http://127.0.0.1:11434/v1`, llama.cpp, vLLM, OpenAI…), then open the **✦ Assistant** sidebar (available on every tab, collapsible, remembers its state) and type something like *"let curl reach github.com and anything under anthropic.com, block everything else"*.
 
 The model only **proposes**: it fills a fixed schema (program, destinations, port, subdomains, block-rest) that is validated on the server and again in the browser, and shown as a preview. Nothing changes until you click **Apply**. It can only propose allow entries.
 

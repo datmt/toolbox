@@ -75,3 +75,25 @@ dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--p
 dialog::backdrop { background: rgba(0,0,0,.5); }
 .err { color: var(--deny); min-height: 1.2em; margin: 6px 0; }
 #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 9px 16px; border-radius: 8px; z-index: 20; }
+
+/* layout with collapsible assistant sidebar */
+.hbtns { display: flex; gap: 6px; }
+.layout { display: flex; align-items: flex-start; }
+.layout > main { flex: 1; min-width: 0; margin: 0 auto; }
+#assistant { width: 380px; flex: none; position: sticky; top: 49px; height: calc(100vh - 49px); display: flex; flex-direction: column;
+  background: var(--panel); border-left: 1px solid var(--line); }
+#assistant.collapsed { display: none; }
+.ahead { display: flex; gap: 8px; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.ahead .muted { font-size: 11px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.spacer { flex: 1; }
+#chatLog { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.bubble { padding: 8px 12px; border-radius: 10px; max-width: 95%; word-break: break-word; }
+.bubble.user { align-self: flex-end; background: var(--ok-bg); }
+.bubble.bot { align-self: flex-start; background: var(--bg); border: 1px solid var(--line); }
+.bubble ul { margin: 4px 0; padding-left: 18px; }
+.composer { padding: 10px 12px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.composer textarea { font-family: inherit; font-size: 14px; resize: vertical; }
+button.active-toggle { background: var(--ok-bg); color: var(--accent); }
+@media (max-width: 900px) {
+  #assistant { position: fixed; right: 0; top: 49px; z-index: 8; width: min(380px, 100vw); box-shadow: -8px 0 24px rgba(0,0,0,.25); }
+}

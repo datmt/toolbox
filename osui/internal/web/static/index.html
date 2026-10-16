@@ -14,18 +14,38 @@
     <button data-tab="allow">Allowlists</button>
     <button data-tab="rules">Rules <span id="ruleCount" class="muted"></span></button>
     <button data-tab="log">Connections</button>
-    <button data-tab="settings">Settings</button>
   </nav>
   <div id="stats" class="muted"></div>
+  <div class="hbtns">
+    <button id="assistantToggle" class="ghost" title="Toggle assistant sidebar" aria-expanded="false">✦ Assistant</button>
+    <button id="gear" class="ghost" title="Settings" aria-label="Settings">⚙</button>
+  </div>
 </header>
 
-<main>
-  <section id="tab-prompts"></section>
-  <section id="tab-allow" class="hidden"></section>
-  <section id="tab-rules" class="hidden"></section>
-  <section id="tab-log" class="hidden"></section>
-  <section id="tab-settings" class="hidden"></section>
-</main>
+<div class="layout">
+  <main>
+    <section id="tab-prompts"></section>
+    <section id="tab-allow" class="hidden"></section>
+    <section id="tab-rules" class="hidden"></section>
+    <section id="tab-log" class="hidden"></section>
+    <section id="tab-settings" class="hidden"></section>
+  </main>
+
+  <aside id="assistant" class="collapsed" aria-label="Assistant">
+    <div class="ahead">
+      <b>Assistant</b>
+      <span id="askModel" class="muted"></span>
+      <span class="spacer"></span>
+      <button id="chatClear" class="small ghost" title="Clear conversation">Clear</button>
+      <button id="assistantClose" class="small ghost" aria-label="Close sidebar">✕</button>
+    </div>
+    <div id="chatLog"></div>
+    <div class="composer">
+      <textarea id="askText" rows="3" placeholder="Describe rules in plain English… (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="askSend" class="primary">Propose</button>
+    </div>
+  </aside>
+</div>
 
 <dialog id="editor">
   <form method="dialog" id="editorForm">
