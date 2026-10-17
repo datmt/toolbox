@@ -8,7 +8,7 @@ const stub = new Proxy(function () {}, { get: () => stub, apply: () => stub, set
 const ctx = vm.createContext({ document: stub, window: {}, fetch: () => Promise.reject(new Error('offline')),
   EventSource: stub, console, setTimeout, clearTimeout, requestAnimationFrame: () => 0, confirm: () => true });
 const src = fs.readFileSync(new URL('../internal/web/static/app.js', import.meta.url), 'utf8');
-vm.runInContext(src + '\n;globalThis.T = { parseEntry, scopes, baseDomain, denyName, entryName, classifyName: pk, describeIntent };', ctx);
+vm.runInContext(src + '\n;globalThis.T = { parseEntry, scopes, baseDomain, denyName, entryName, classifyName: pk, describeAction, needsConfirm, buildHistory, echoAction };', ctx);
 const T = ctx.T;
 
 // domains
@@ -46,8 +46,32 @@ assert.ok(sc.find(s => s.id === 'domain').operator.list[1].data.includes('github
 assert.ok(sc.find(s => s.id === 'proc').broad);
 assert.equal(T.baseDomain('www.bbc.co.uk'), 'bbc.co.uk');
 assert.equal(T.scopes({ path: '/x', dstHost: '', dstIp: '1.1.1.1', dstPort: 53 })[0].id, 'ip-port');
-// LLM proposals are re-validated client-side; bad destinations are reported, not applied
-const d = T.describeIntent({ destinations: ['github.com', 'bad host!', '10.0.0.0/8', '999.9.9.9'], include_subdomains: true });
+// assistant actions are re-validated client-side; bad destinations are reported, not applied
+const d = T.describeAction({ destinations: ['github.com', 'bad host!', '10.0.0.0/8', '999.9.9.9'], include_subdomains: true });
 assert.equal(JSON.stringify(d.parsed.map(x => x.text)), JSON.stringify(['*.github.com', '10.0.0.0/8']));
 assert.equal(d.problems.length, 2);
+assert.equal(T.describeAction({ type: 'set_block_rest' }).parsed.length, 0);
+
+// deletes need an explicit confirm; nothing else does
+assert.ok(T.needsConfirm({ type: 'delete_rule' }));
+for (const t of ['allow_entries', 'set_block_rest', 'enable_rule', 'disable_rule']) assert.ok(!T.needsConfirm({ type: t }), t);
+
+// history: capped, errors skipped, outcomes recorded, only succeeded actions echoed for applied turns
+const chat = [];
+for (let i = 0; i < 12; i++) chat.push({ role: 'user', text: 'q' + i });
+chat.push({ role: 'bot', error: 'boom' });
+chat.push({ role: 'bot', reply: 'done', state: 'applied', actions: [
+  { type: 'disable_rule', rule: 'r1', name: 'allow-curl-any', status: 'ok', summary: 'x', risk: 'broad' },
+  { type: 'delete_rule', rule: 'r2', name: 'old', status: 'failed', err: 'nope' }] });
+chat.push({ role: 'bot', reply: 'maybe', state: 'discarded', actions: [{ type: 'set_block_rest', program: '/usr/bin/curl', enabled: true }] });
+chat.push({ role: 'bot', reply: 'just text', state: 'none', actions: [] });
+const hist = T.buildHistory(chat, 4);
+assert.equal(hist.length, 4);
+assert.equal(hist.map(x => x.role).join(), 'user,assistant,assistant,assistant');
+const applied = hist[1];
+assert.equal(applied.outcome, 'applied'); assert.equal(applied.actions.length, 1); assert.equal(applied.actions[0].name, 'allow-curl-any');
+assert.equal(hist[2].outcome, 'discarded'); assert.equal(hist[3].outcome, 'none');
+assert.ok(!('summary' in applied.actions[0]) && !('risk' in applied.actions[0]), 'only schema fields are echoed');
+assert.equal(T.buildHistory(chat, 0).length, 0);
+assert.equal(T.buildHistory([{ role: 'user', text: 'x'.repeat(5000) }], 8)[0].text.length, 1000);
 console.log('ui logic: all passed');

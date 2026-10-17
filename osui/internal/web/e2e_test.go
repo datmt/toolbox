@@ -280,32 +280,97 @@ type fakeLLM func(*http.Request) (*http.Response, error)
 
 func (f fakeLLM) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-func TestLLMProposeEndpoint(t *testing.T) {
+func TestAssistantTurnEndpoint(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OSUI_LLM_KEY", "")
 	h := hub.New()
 	w := web.New(h, token, "127.0.0.1:8899")
 	w.LLM = llm.Load()
+	var lastBody string
+	release := make(chan struct{})
+	block := false
+	started := make(chan struct{}, 1)
 	w.LLM.HTTP = &http.Client{Transport: fakeLLM(func(r *http.Request) (*http.Response, error) {
-		b, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": `{"intents":[{"program":"/usr/bin/curl","destinations":["github.com"],"port":"","include_subdomains":true,"block_rest":true}]}`}}}})
-		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(b)), Header: http.Header{}}, nil
+		b, _ := io.ReadAll(r.Body)
+		lastBody = string(b)
+		if block {
+			started <- struct{}{}
+			<-release
+		}
+		out, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": `{"reply":"hi there","actions":[{"type":"allow_entries","program":"/usr/bin/curl","destinations":["github.com"],"port":"","include_subdomains":true},{"type":"delete_rule","rule":"r9"}]}`}}}})
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(out)), Header: http.Header{}}, nil
 	})}
 	e := &env{t: t, hub: h, h: w.Handler(), port: "8899", origin: "http://127.0.0.1:8899"}
+	turn := map[string]any{"message": "curl github only", "inspect": true,
+		"history": []map[string]any{{"role": "user", "text": "earlier question"}, {"role": "assistant", "text": "earlier answer", "outcome": "none"}}}
 
-	if resp, _ := e.do("POST", "/api/llm/propose", map[string]string{"text": "curl github only"}, nil); resp.StatusCode != 502 {
+	if resp, _ := e.do("POST", "/api/assistant/turn", turn, nil); resp.StatusCode != 502 {
 		t.Errorf("unconfigured: want 502 got %d", resp.StatusCode)
 	}
 	if resp, body := e.do("POST", "/api/llm", map[string]any{"url": "http://llm.test/v1", "model": "m", "key": "k"}, nil); resp.StatusCode != 200 || bytes.Contains(body, []byte(`"k"`)) {
 		t.Fatalf("set: %d %s", resp.StatusCode, body)
 	}
-	resp, body := e.do("POST", "/api/llm/propose", map[string]string{"text": "curl github only"}, nil)
-	if resp.StatusCode != 200 || !bytes.Contains(body, []byte("github.com")) {
-		t.Fatalf("propose: %d %s", resp.StatusCode, body)
+	// remote endpoint: nothing injected by default
+	_, body := e.do("GET", "/api/llm", nil, nil)
+	if !bytes.Contains(body, []byte(`"context":{"rules":false,"daemon":false,"traffic":false}`)) {
+		t.Errorf("remote defaults: %s", body)
 	}
+	resp, body := e.do("POST", "/api/assistant/turn", turn, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("turn: %d %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Reply     string
+		Actions   []map[string]any
+		Notes     []string
+		Inspector map[string]any
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Reply != "hi there" || len(out.Actions) != 1 || out.Actions[0]["type"] != "allow_entries" || len(out.Notes) != 1 || out.Inspector == nil {
+		t.Errorf("response: %s", body)
+	}
+	if !strings.Contains(lastBody, "earlier answer") || strings.Contains(lastBody, `"k"`) || strings.Contains(lastBody, "RULES:") {
+		t.Errorf("sent body: %s", lastBody)
+	}
+	// inspector only when asked
+	turn["inspect"] = false
+	if _, body := e.do("POST", "/api/assistant/turn", turn, nil); bytes.Contains(body, []byte(`"inspector"`)) {
+		t.Errorf("inspector present without inspect: %s", body)
+	}
+	// bad input -> 400
+	if resp, _ := e.do("POST", "/api/assistant/turn", map[string]any{"message": ""}, nil); resp.StatusCode != 400 {
+		t.Errorf("empty message: want 400 got %d", resp.StatusCode)
+	}
+	// concurrent turn -> 429
+	block = true
+	done := make(chan int)
+	go func() { r, _ := e.do("POST", "/api/assistant/turn", turn, nil); done <- r.StatusCode }()
+	<-started
+	if resp, _ := e.do("POST", "/api/assistant/turn", turn, nil); resp.StatusCode != 429 {
+		t.Errorf("concurrent turn: want 429 got %d", resp.StatusCode)
+	}
+	close(release)
+	if code := <-done; code != 200 {
+		t.Errorf("first turn: %d", code)
+	}
+	block = false
+	// settings round trip, validation and old endpoint removal
 	if resp, _ := e.do("POST", "/api/llm", map[string]any{"url": "file:///etc/passwd", "model": "m"}, nil); resp.StatusCode != 400 {
 		t.Errorf("bad url: want 400 got %d", resp.StatusCode)
 	}
-	if resp, _ := e.do("POST", "/api/llm/propose", map[string]string{"text": "x"}, func(r *http.Request) { r.Header.Set("Origin", "http://evil.example") }); resp.StatusCode != 403 {
-		t.Errorf("cross-origin propose: want 403 got %d", resp.StatusCode)
+	if resp, _ := e.do("POST", "/api/llm", map[string]any{"url": "http://llm.test/v1", "model": "m", "instructions": strings.Repeat("a", 2001)}, nil); resp.StatusCode != 400 {
+		t.Errorf("long instructions: want 400 got %d", resp.StatusCode)
+	}
+	if resp, _ := e.do("POST", "/api/llm/propose", map[string]string{"text": "x"}, nil); resp.StatusCode != 404 && resp.StatusCode != 405 {
+		t.Errorf("old propose endpoint should be gone, got %d", resp.StatusCode)
+	}
+	// auth / origin
+	if resp, _ := e.do("POST", "/api/assistant/turn", turn, func(r *http.Request) { r.Header.Set("Origin", "http://evil.example") }); resp.StatusCode != 403 {
+		t.Errorf("cross-origin turn: want 403 got %d", resp.StatusCode)
+	}
+	if resp, _ := e.do("POST", "/api/assistant/turn", turn, func(r *http.Request) { r.Header.Del("Cookie") }); resp.StatusCode != 401 {
+		t.Errorf("no token: want 401 got %d", resp.StatusCode)
 	}
 }

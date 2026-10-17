@@ -1,6 +1,6 @@
 # Assistant v2: context-aware rule assistant
 
-Status: **spec, not implemented.** Written against `osui` at commit `b774af0`.
+Status: **implemented** (defaults in §4 and §14.1 used as proposed; `delete_rule` included with a confirm tick). Written against `osui` at commit `b774af0`.
 
 ## 1. Problem
 

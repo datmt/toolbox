@@ -8,14 +8,17 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"osui/internal/assistant"
 	"osui/internal/hub"
 	"osui/internal/llm"
 	pb "osui/internal/pb"
@@ -29,6 +32,8 @@ type Web struct {
 	Token string
 	Addr  string // host:port the browser uses
 	LLM   *llm.Client
+
+	turning atomic.Bool
 
 	mux *http.ServeMux
 }
@@ -47,7 +52,7 @@ func New(h *hub.Hub, token, addr string) *Web {
 	w.mux.HandleFunc("DELETE /api/rules/{name}", w.deleteRule)
 	w.mux.HandleFunc("GET /api/llm", w.llmGet)
 	w.mux.HandleFunc("POST /api/llm", w.llmSet)
-	w.mux.HandleFunc("POST /api/llm/propose", w.llmPropose)
+	w.mux.HandleFunc("POST /api/assistant/turn", w.assistantTurn)
 	return w
 }
 
@@ -329,7 +334,7 @@ func (w *Web) deleteRule(rw http.ResponseWriter, r *http.Request) {
 	writeJSON(rw, 200, map[string]bool{"ok": true})
 }
 
-// ---- LLM helper: proposes allowlist entries, never creates rules ----
+// ---- LLM assistant: proposes changes, never applies them ----
 
 func (w *Web) llmGet(rw http.ResponseWriter, _ *http.Request) {
 	if w.LLM == nil {
@@ -344,64 +349,46 @@ func (w *Web) llmSet(rw http.ResponseWriter, r *http.Request) {
 		fail(rw, 404, fmt.Errorf("LLM support disabled"))
 		return
 	}
-	var in struct {
-		URL      string `json:"url"`
-		Model    string `json:"model"`
-		Key      string `json:"key"`
-		ClearKey bool   `json:"clearKey"`
-	}
+	var in llm.Update
 	if err := readJSON(r, &in); err != nil {
 		fail(rw, 400, err)
 		return
 	}
-	if err := w.LLM.Set(in.URL, in.Model, in.Key, in.ClearKey); err != nil {
+	if err := w.LLM.Set(in); err != nil {
 		fail(rw, 400, err)
 		return
 	}
 	writeJSON(rw, 200, w.LLM.Public())
 }
 
-// knownPrograms lists process paths the user already has rules or traffic for.
-func (w *Web) knownPrograms() []string {
-	seen := map[string]bool{}
-	var out []string
-	add := func(p string) {
-		if p != "" && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
-		}
-	}
-	for _, r := range w.Hub.Rules() {
-		for _, l := range flatten(opToJSON(r.Operator)) {
-			if l.Operand == "process.path" && l.Type == "simple" {
-				add(l.Data)
-			}
-		}
-	}
-	for _, e := range w.Hub.Log() {
-		add(e.Process)
-	}
-	return out
-}
-
-func (w *Web) llmPropose(rw http.ResponseWriter, r *http.Request) {
+// assistantTurn runs one stateless assistant turn. Only one may be in flight:
+// the model call is slow and the UI has a single user.
+func (w *Web) assistantTurn(rw http.ResponseWriter, r *http.Request) {
 	if w.LLM == nil {
 		fail(rw, 404, fmt.Errorf("LLM support disabled"))
 		return
 	}
-	var in struct {
-		Text string `json:"text"`
-	}
+	var in assistant.Request
 	if err := readJSON(r, &in); err != nil {
 		fail(rw, 400, err)
 		return
 	}
+	if !w.turning.CompareAndSwap(false, true) {
+		fail(rw, 429, fmt.Errorf("another assistant turn is still running"))
+		return
+	}
+	defer w.turning.Store(false)
 	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
 	defer cancel()
-	p, err := w.LLM.Propose(ctx, in.Text, w.knownPrograms())
+	resp, err := (&assistant.Assistant{Src: w.Hub, LLM: w.LLM}).Turn(ctx, in)
 	if err != nil {
+		var ie assistant.InputError
+		if errors.As(err, &ie) {
+			fail(rw, 400, err)
+			return
+		}
 		fail(rw, 502, err)
 		return
 	}
-	writeJSON(rw, 200, p)
+	writeJSON(rw, 200, resp)
 }

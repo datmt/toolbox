@@ -97,3 +97,8 @@ button.active-toggle { background: var(--ok-bg); color: var(--accent); }
 @media (max-width: 900px) {
   #assistant { position: fixed; right: 0; top: 49px; z-index: 8; width: min(380px, 100vw); box-shadow: -8px 0 24px rgba(0,0,0,.25); }
 }
+.acard { border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; margin: 6px 0; background: var(--panel); }
+.acard.del { border-color: var(--deny); }
+.inspector { margin-top: 8px; font-size: 12px; }
+.inspector pre { white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 6px; margin: 2px 0 8px; font-size: 11.5px; }
+input[type=number] { font: inherit; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; width: 110px; }

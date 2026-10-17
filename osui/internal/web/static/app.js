@@ -307,91 +307,208 @@ const putDeny = prog => api('POST', '/api/rules', { name: denyName(prog), descri
 // and applied only when the user clicks Apply.
 async function loadLLM() { try { S.llm = await api('GET', '/api/llm'); } catch { S.llm = null; } }
 
-function describeIntent(i) {
+// ---------- assistant actions ----------
+// Everything below re-validates what the server already validated: the model's
+// output is never trusted, and nothing runs until the user clicks Apply.
+function describeAction(a) {
   const parsed = [], problems = [];
-  for (const d of i.destinations) { try { const e = parseEntry(d, i.include_subdomains); if (e) parsed.push(e); } catch (err) { problems.push(err.message); } }
+  for (const d of a.destinations || []) { try { const e = parseEntry(d, a.include_subdomains); if (e) parsed.push(e); } catch (err) { problems.push(err.message); } }
   return { parsed, problems };
+}
+const needsConfirm = a => a.type === 'delete_rule';
+const ruleOpPath = (name, op) => `/api/rules/${encodeURIComponent(name)}` + (op ? '/' + op : '');
+
+async function applyAction(a) {
+  switch (a.type) {
+    case 'allow_entries': {
+      const { parsed } = describeAction(a);
+      if (!parsed.length) throw new Error('no valid destinations');
+      await addEntries(a.program, parsed.map(e => e.text).join(' '), a.port || '', a.include_subdomains);
+      S.alProg = a.program; return;
+    }
+    case 'set_block_rest': {
+      if (a.enabled) { await putDeny(a.program); return; }
+      const d = S.rules.find(r => r.name === denyName(a.program));
+      if (d) await api('DELETE', ruleOpPath(d.name));
+      return;
+    }
+    case 'enable_rule': await api('POST', ruleOpPath(a.name, 'enable')); return;
+    case 'disable_rule': await api('POST', ruleOpPath(a.name, 'disable')); return;
+    case 'delete_rule': await api('DELETE', ruleOpPath(a.name)); return;
+    default: throw new Error('unknown action ' + a.type);
+  }
+}
+
+// Only schema fields go back to the server; it re-validates them and resolves
+// rules by name against fresh state.
+function echoAction(a) {
+  return { type: a.type, program: a.program, destinations: a.destinations, port: a.port,
+    include_subdomains: a.include_subdomains, enabled: a.enabled, name: a.name };
+}
+// Conversation sent with each turn: last n entries, text capped, applied
+// proposals echo only the actions that actually succeeded.
+function buildHistory(chat, n) {
+  const out = [];
+  for (const m of chat) {
+    if (m.error) continue;
+    if (m.role === 'user') { out.push({ role: 'user', text: m.text.slice(0, 1000) }); continue; }
+    const applied = m.state === 'applied';
+    out.push({ role: 'assistant', text: (m.reply || '').slice(0, 1000),
+      outcome: applied ? 'applied' : m.state === 'discarded' ? 'discarded' : 'none',
+      actions: (m.actions || []).filter(a => !applied || a.status === 'ok').map(echoAction) });
+  }
+  return n > 0 ? out.slice(-n) : [];
 }
 
 // ---------- settings tab ----------
 function renderSettings() {
   const root = $('#tab-settings');
   const ae = document.activeElement;
-  if (root.contains(ae) && ae.tagName === 'INPUT' && ae.value) return; // don't wipe typing
+  if (root.contains(ae) && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && ae.type !== 'checkbox' && ae.value) return; // don't wipe typing
   const L = S.llm || {};
   const urlIn = h('input', { type: 'text', id: 'llmUrl', size: 44, value: L.url || '', placeholder: 'http://127.0.0.1:11434/v1' });
   const modelIn = h('input', { type: 'text', id: 'llmModel', size: 26, value: L.model || '', placeholder: 'e.g. qwen2.5:7b' });
   const keyIn = h('input', { type: 'password', id: 'llmKey', size: 26, autocomplete: 'off',
     placeholder: L.hasKey ? 'key saved — leave blank to keep' : 'optional' });
   const status = h('span', { class: 'muted', id: 'llmStatus' });
+  const ctx = L.context || { rules: false, daemon: false, traffic: false };
+  const toggles = {};
+  const toggle = (k, label, what) => h('label', { class: 'scope' },
+    toggles[k] = h('input', { type: 'checkbox', checked: !!ctx[k] }),
+    h('span', {}, label, h('small', {}, what)));
+  const instrIn = h('textarea', { id: 'llmInstr', rows: 4, maxlength: 2000, spellcheck: 'false',
+    placeholder: 'Optional preferences, e.g. "Prefer exact hostnames over wildcards. Keep answers short." They cannot relax the safety rules.' });
+  instrIn.value = L.instructions || '';
+  const maxIn = h('input', { type: 'number', id: 'llmMax', min: 2000, max: 60000, step: 1000, value: L.maxContextChars || 12000 });
+  const histIn = h('input', { type: 'number', id: 'llmHist', min: 0, max: 16, value: L.historyTurns ?? 8 });
+  const inspIn = h('input', { type: 'checkbox', id: 'llmInsp', checked: !!L.inspector });
   const save = async clear => {
-    S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true });
+    S.llm = await api('POST', '/api/llm', { url: urlIn.value, model: modelIn.value, key: keyIn.value, clearKey: clear === true,
+      instructions: instrIn.value, inspector: inspIn.checked,
+      context: { rules: toggles.rules.checked, daemon: toggles.daemon.checked, traffic: toggles.traffic.checked },
+      maxContextChars: +maxIn.value || 12000, historyTurns: Math.max(0, Math.min(16, +histIn.value || 0)) });
     keyIn.value = ''; renderChat();
   };
   const preset = (url, model) => h('button', { class: 'small', onclick: () => { urlIn.value = url; if (model) modelIn.value = model; } }, url.includes('11434') ? 'Ollama' : url.includes('openai') ? 'OpenAI' : 'llama.cpp');
+  const sent = ['rules', 'daemon', 'traffic'].filter(k => ctx[k]);
   root.replaceChildren(
     h('div', { class: 'card' },
       h('h2', {}, 'LLM endpoint'),
-      h('p', { class: 'muted' }, 'Used by "Describe what you want" on the Allowlists tab. Any OpenAI-compatible chat endpoint works. The model only proposes rules; you review and apply them.'),
+      h('p', { class: 'muted' }, 'Used by the ✦ Assistant sidebar. Any OpenAI-compatible chat endpoint works. The model only proposes changes; you review and apply them.'),
       h('div', { class: 'row', style: 'margin:8px 0' }, h('span', { class: 'muted' }, 'Presets:'),
         preset('http://127.0.0.1:11434/v1'), preset('http://127.0.0.1:8080/v1'), preset('https://api.openai.com/v1', 'gpt-4o-mini')),
       h('dl', { class: 'kv', style: 'grid-template-columns:130px 1fr' },
         h('dt', {}, 'Base URL'), h('dd', {}, urlIn),
         h('dt', {}, 'Model'), h('dd', {}, modelIn),
         h('dt', {}, 'API key'), h('dd', {}, keyIn)),
-      h('div', { class: 'row' },
+      L.url && !L.loopback ? h('p', { class: 'err' }, 'This endpoint is not on this machine: ' +
+        (sent.length ? `your messages plus your ${sent.join(', ')} data are sent to it.` : 'your messages are sent to it (no rules, daemon or traffic data is enabled).')) : null,
+      h('p', { class: 'muted' }, 'The key is stored in ~/.config/osui/llm.json (mode 0600) and is never sent back to the browser. OSUI_LLM_KEY overrides it.')),
+    h('div', { class: 'card' },
+      h('h2', {}, 'What the assistant may see'),
+      h('p', { class: 'muted' }, 'Sent with every message, after sanitizing. Defaults are on for a local endpoint (rules and daemon facts) and all off for a remote one. Switching between local and remote resets them unless you changed them.'),
+      h('div', { class: 'scopes' },
+        toggle('rules', 'Rules', 'Each rule: id, action, duration, enabled, risk, process, match summary, name and description.'),
+        toggle('daemon', 'Daemon facts', 'Daemon version, connection state, and a fixed list of config keys (default action/duration, intercept, proc monitor, firewall, log level). Never the server/auth settings.'),
+        toggle('traffic', 'Recent traffic', 'Aggregated, not raw: top programs with their most frequent destinations and the action taken.')),
+      h('dl', { class: 'kv', style: 'grid-template-columns:200px 1fr' },
+        h('dt', {}, 'Max context (chars)'), h('dd', {}, maxIn, h('span', { class: 'muted' }, '  ≈ 4 chars per token; lower this for small local models')),
+        h('dt', {}, 'History turns'), h('dd', {}, histIn, h('span', { class: 'muted' }, '  messages of conversation sent each time (0–16)')),
+        h('dt', {}, 'Prompt inspector'), h('dd', {}, h('label', { class: 'row' }, inspIn, 'Show "What was sent" on each assistant reply'))),
+      h('h3', {}, 'Custom instructions'),
+      instrIn,
+      h('div', { class: 'row', style: 'margin-top:12px' },
         h('button', { class: 'primary', onclick: guard(async () => { await save(false); toast('Saved'); renderSettings(); }) }, 'Save'),
         h('button', { class: 'ghost', onclick: guard(async () => {
           await save(false);
-          status.textContent = 'testing…';
+          status.textContent = 'testing…'; status.className = 'muted';
           try {
-            const r = await api('POST', '/api/llm/propose', { text: 'allow /usr/bin/curl to reach example.com' });
-            status.textContent = `OK — endpoint replied (${r.intents.length} proposal${r.intents.length === 1 ? '' : 's'}${r.note ? ', note: ' + r.note : ''})`;
-            status.className = 'tag narrow';
+            await api('POST', '/api/assistant/turn', { message: 'Reply with an empty actions list and the word OK.', history: [] });
+            status.textContent = 'OK — endpoint replied'; status.className = 'tag narrow';
           } catch (e) { status.textContent = 'Failed: ' + e.message; status.className = 'err'; }
         }) }, 'Save & test'),
         L.hasKey ? h('button', { class: 'small danger', onclick: guard(async () => { await save(true); toast('Key removed'); renderSettings(); }) }, 'Remove key') : null,
-        status),
-      L.url && !L.loopback ? h('p', { class: 'err' }, 'This endpoint is not on this machine: your request text and the names of programs you have rules for are sent to it.') : null,
-      h('p', { class: 'muted' }, 'The key is stored in ~/.config/osui/llm.json (mode 0600) and is never sent back to the browser. OSUI_LLM_KEY overrides it.')));
+        status)));
 }
 
 // ---------- assistant sidebar ----------
 function chatBubble(m) {
   if (m.role === 'user') return h('div', { class: 'bubble user' }, m.text);
   if (m.error) return h('div', { class: 'bubble bot' }, h('span', { class: 'err' }, m.error));
-  return h('div', { class: 'bubble bot' }, proposalView(m));
+  return h('div', { class: 'bubble bot' }, actionsView(m), inspectorView(m));
 }
 
-function proposalView(m) {
-  const p = m.proposal;
-  const rows = p.intents.map(i => ({ i, ...describeIntent(i) })).filter(r => r.parsed.length);
-  const known = new Set(knownProgs());
+function inspectorView(m) {
+  const i = m.inspector;
+  if (!i) return null;
+  return h('details', { class: 'inspector' },
+    h('summary', {}, `What was sent (~${i.approxTokens} tokens, prompt v${i.version})`),
+    h('p', { class: 'muted' }, 'System prompt:'), h('pre', {}, i.system),
+    h('p', { class: 'muted' }, 'Context block:'), h('pre', {}, i.context),
+    h('p', { class: 'muted' }, 'Messages:'), h('pre', {}, i.messages.map(x => `[${x.role}] ${x.content}`).join('\n\n')));
+}
+
+function actionCard(m, a, locked) {
+  const risk = a.risk ? h('span', { class: 'tag ' + a.risk, title: 'risk of the rule' }, a.risk) : null;
+  const stat = a.status === 'ok' ? h('span', { class: 'tag narrow' }, 'done') : a.status === 'failed' ? h('span', { class: 'err' }, 'failed: ' + a.err) : null;
+  const cls = 'acard' + (needsConfirm(a) ? ' del' : '');
+  switch (a.type) {
+    case 'allow_entries': {
+      const d = describeAction(a);
+      const known = new Set(knownProgs());
+      return h('div', { class: cls },
+        h('div', {}, h('span', { class: 'mono' }, a.program), ' may reach' + (a.port ? ` port ${a.port} of` : ':'), ' ', risk, ' ', stat),
+        h('ul', {}, d.parsed.map(e => h('li', { class: 'mono' }, e.text))),
+        !locked && !known.has(a.program) ? h('div', { class: 'err' }, 'No rules or traffic for this program yet — check the path.') : null,
+        d.problems.length ? h('div', { class: 'err' }, 'Skipped: ' + d.problems.join('; ')) : null);
+    }
+    case 'set_block_rest':
+      return h('div', { class: cls }, h('b', {}, a.enabled ? 'Block everything else for ' : 'Stop blocking everything else for '),
+        h('span', { class: 'mono' }, a.program), ' ', stat);
+    default: {
+      const verb = { enable_rule: 'Enable', disable_rule: 'Disable', delete_rule: 'Delete' }[a.type] || a.type;
+      return h('div', { class: cls },
+        h('div', {}, h('b', {}, verb + ' rule '), h('span', { class: 'mono' }, a.name), ' ', risk, ' ',
+          h('span', { class: 'muted' }, a.ruleEnabled ? '(currently enabled)' : '(currently disabled)'), ' ', stat),
+        h('div', { class: 'mono muted' }, a.summary),
+        needsConfirm(a) && !locked && a.status !== 'ok' ? h('label', { class: 'row err' },
+          h('input', { type: 'checkbox', checked: !!a.confirmed, onchange: e => { a.confirmed = e.target.checked; } }),
+          'Yes, delete this rule') : null);
+    }
+  }
+}
+
+function actionsView(m) {
+  const acts = m.actions || [];
   const done = m.state !== 'pending';
   const apply = guard(async () => {
-    for (const r of rows) {
-      await addEntries(r.i.program, r.parsed.map(e => e.text).join(' '), r.i.port, r.i.include_subdomains);
-      if (r.i.block_rest) await putDeny(r.i.program);
+    const todo = acts.filter(a => a.status !== 'ok');
+    if (todo.some(a => needsConfirm(a) && !a.confirmed)) { toast('Tick the confirmation on each delete first'); return; }
+    m.applying = true; renderChat();
+    let failed = false;
+    for (const a of todo) {
+      try { await applyAction(a); a.status = 'ok'; a.err = ''; }
+      catch (e) { a.status = 'failed'; a.err = e.message; failed = true; break; }
     }
-    m.state = 'applied'; S.alProg = rows[0].i.program;
+    m.applying = false;
+    const okCount = acts.filter(a => a.status === 'ok').length;
+    if (okCount) m.state = 'applied';
+    if (failed) m.failure = okCount ? `Applied ${okCount} of ${acts.length} actions; stopped at the first failure.` : 'Nothing was applied.';
     if (S.tab === 'allow') renderAllow();
     renderChat();
   });
-  if (!rows.length) return h('div', {}, p.note ? h('p', {}, p.note) : null, 'I could not turn that into usable entries. Try rephrasing, or add them on the Allowlists tab.');
+  const anyDel = acts.some(needsConfirm);
   return h('div', {},
-    p.note ? h('p', { class: 'muted' }, p.note) : null,
-    h('b', {}, done ? (m.state === 'applied' ? 'Applied:' : 'Discarded:') : 'Proposed changes (nothing applied yet):'),
-    rows.map(r => h('div', { style: 'margin:6px 0' },
-      h('div', {}, h('span', { class: 'mono' }, r.i.program), ' may reach' + (r.i.port ? ` port ${r.i.port} of` : ':')),
-      h('ul', {}, r.parsed.map(e => h('li', { class: 'mono' }, e.text))),
-      r.i.block_rest ? h('div', { class: 'tag medium' }, 'then block everything else for this program') : null,
-      !done && !known.has(r.i.program) ? h('div', { class: 'err' }, 'No rules or traffic for this program yet — check the path.') : null,
-      r.problems.length ? h('div', { class: 'err' }, 'Skipped: ' + r.problems.join('; ')) : null)),
-    done
-      ? (m.state === 'applied' ? h('button', { class: 'small', onclick: () => { S.alProg = rows[0].i.program; showTab('allow'); } }, 'View in Allowlists') : null)
-      : h('div', { class: 'row' },
-          h('button', { class: 'primary', onclick: apply }, 'Apply'),
-          h('button', { class: 'ghost', onclick: () => { m.state = 'discarded'; renderChat(); } }, 'Discard')));
+    m.reply ? h('p', { style: 'white-space:pre-wrap;margin:0 0 6px' }, m.reply) : (acts.length ? null : h('p', { class: 'muted' }, '(no reply)')),
+    (m.notes || []).map(n => h('div', { class: 'muted' }, 'Note: ' + n)),
+    acts.length ? h('b', {}, done ? (m.state === 'applied' ? 'Applied:' : 'Discarded:') : 'Proposed changes (nothing applied yet):') : null,
+    acts.map(a => actionCard(m, a, done && m.state === 'discarded')),
+    m.failure ? h('div', { class: 'err' }, m.failure) : null,
+    acts.length && (!done || (m.state === 'applied' && acts.some(a => a.status !== 'ok')))
+      ? h('div', { class: 'row' },
+          h('button', { class: anyDel ? 'deny' : 'primary', disabled: !!m.applying, onclick: apply }, m.state === 'applied' ? 'Retry remaining' : 'Apply'),
+          m.state === 'applied' ? null : h('button', { class: 'ghost', onclick: () => { m.state = 'discarded'; renderChat(); } }, 'Discard'))
+      : null);
 }
 
 function renderChat() {
@@ -402,8 +519,8 @@ function renderChat() {
     !configured ? h('div', { class: 'bubble bot' }, 'No LLM endpoint is configured yet. ',
       h('button', { class: 'small', onclick: () => showTab('settings') }, 'Open settings')) : null,
     configured && !S.chat.length ? h('div', { class: 'muted' },
-      'Describe the rules you want, e.g. "let curl reach github.com and anything under anthropic.com, block everything else". ',
-      'I only propose allow entries; you review them and click Apply.') : null,
+      'Ask about your rules ("why is curl allowed everywhere?") or describe a change ("restrict curl to github.com"). ',
+      'I only propose; you review each change and click Apply.') : null,
     S.chat.map(chatBubble),
     S.asking ? h('div', { class: 'bubble bot muted' }, 'Thinking…') : null);
   log.scrollTop = log.scrollHeight;
@@ -417,10 +534,13 @@ async function sendAsk() {
   const text = ta.value.trim();
   if (!text || S.asking || !S.llm || !S.llm.url) return;
   ta.value = '';
+  const history = buildHistory(S.chat, S.llm.historyTurns ?? 8);
   S.chat.push({ role: 'user', text });
   S.asking = true; renderChat();
-  try { S.chat.push({ role: 'bot', proposal: await api('POST', '/api/llm/propose', { text }), state: 'pending' }); }
-  catch (e) { S.chat.push({ role: 'bot', error: e.message }); }
+  try {
+    const r = await api('POST', '/api/assistant/turn', { message: text, history, inspect: !!S.llm.inspector });
+    S.chat.push({ role: 'bot', reply: r.reply, actions: r.actions || [], notes: r.notes || [], inspector: r.inspector, state: r.actions && r.actions.length ? 'pending' : 'none' });
+  } catch (e) { S.chat.push({ role: 'bot', error: e.message }); }
   S.asking = false; renderChat();
 }
 
