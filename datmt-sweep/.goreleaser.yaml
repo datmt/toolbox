@@ -1,0 +1,39 @@
+version: 2
+project_name: datmt-sweep
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: datmt-sweep
+    main: ./cmd/datmt-sweep
+    binary: datmt-sweep
+    env: [CGO_ENABLED=0]
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+nfpms:
+  - id: packages
+    package_name: datmt-sweep
+    vendor: datmt
+    homepage: https://github.com/datmt/datmt-sweep
+    description: Interactive Linux cleaning TUI (packages, docker, caches, power drain, ports)
+    license: MIT
+    formats: [deb, rpm]
+    maintainer: datmt <t2dx.inc@gmail.com>
+    recommends: [sudo]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true

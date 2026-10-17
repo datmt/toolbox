@@ -1,0 +1,29 @@
+# Maintainer: datmt <t2dx.inc@gmail.com>
+pkgname=datmt-sweep
+pkgver=0.9.0
+pkgrel=1
+pkgdesc='Interactive Linux cleaning TUI (packages, docker, caches, power drain, ports)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/datmt/datmt-sweep'
+license=('MIT')
+makedepends=('go')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "$pkgname-$pkgver"
+  export CGO_ENABLED=0
+  go build -trimpath -mod=readonly \
+    -ldflags "-s -w -X main.version=$pkgver" \
+    -o "$pkgname" ./cmd/datmt-sweep
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  go test ./...
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 "$pkgname" "$pkgdir/usr/bin/$pkgname"
+}
