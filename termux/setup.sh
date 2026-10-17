@@ -1,15 +1,19 @@
 #!/data/data/com.termux/files/usr/bin/bash
-# Termux bootstrap: Nerd Font, neovim, ssh.
+# Termux bootstrap: Nerd Font, neovim, ssh, shell prompt.
 #
 #   curl -fsSL https://raw.githubusercontent.com/datmt/toolbox/main/termux/setup.sh | bash
 #
+# Safe to re-run: every stage checks what is already in place and only adds
+# what is missing.
+#
 # Env overrides:
-#   GITHUB_USER=name      import ssh public keys from github.com/name.keys
-#   NVIM_CONFIG_REPO=url  clone this repo as nvim config instead of the built-in one
-#   SKIP_SSH=1            skip ssh setup
-#   SKIP_NVIM=1           skip neovim setup
-#   SKIP_FONT=1           skip font install
-#   SKIP_UPGRADE=1        skip pkg upgrade (faster)
+#   SHELL_CHOICE=bash|zsh|fish  shell to set up (default bash, login shell untouched for bash)
+#   PROMPT=starship|none        prompt (default starship)
+#   GITHUB_USER=name            import ssh public keys from github.com/name.keys
+#   NVIM_CONFIG_REPO=url        clone this repo as nvim config instead of the built-in one
+#   SKIP_SSH=1 SKIP_NVIM=1 SKIP_FONT=1 SKIP_SHELL=1   skip that stage
+#   SKIP_UPGRADE=1              skip pkg upgrade
+#   FORCE_FONT=1                replace an existing ~/.termux/font.ttf
 
 set -uo pipefail
 
@@ -19,10 +23,13 @@ FONT_ZIP_URL="https://github.com/ryanoasis/nerd-fonts/releases/download/v3.5.1/F
 
 GITHUB_USER="${GITHUB_USER:-}"
 NVIM_CONFIG_REPO="${NVIM_CONFIG_REPO:-}"
+SHELL_CHOICE="${SHELL_CHOICE:-bash}"
+PROMPT="${PROMPT:-starship}"
 
 FAILED=()
 DONE=()
 TMP_DIRS=()
+SSH_HINT=""
 
 cleanup() {
   local d
@@ -36,6 +43,7 @@ trap 'echo; echo "Interrupted."; exit 130' INT TERM
 log()  { printf '\n==> %s\n' "$*"; }
 warn() { printf '  ! %s\n' "$*" >&2; }
 ok()   { printf '  ok: %s\n' "$*"; }
+skip() { printf '  --  %s (already done)\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 ts()   { date +%Y%m%d%H%M%S; }
 
@@ -75,11 +83,39 @@ backup() {
   fi
 }
 
+# add_block FILE MARKER CONTENT: append a marked block once. Backs up FILE
+# before the first change.
+add_block() {
+  local file=$1 marker=$2 content=$3
+  mkdir -p "$(dirname "$file")" || return 1
+  if [ -f "$file" ] && grep -qF "# >>> $marker >>>" "$file"; then
+    skip "$marker in $file"
+    return 0
+  fi
+  backup "$file"
+  {
+    printf '\n# >>> %s >>>\n' "$marker"
+    printf '%s\n' "$content"
+    printf '# <<< %s <<<\n' "$marker"
+  } >> "$file" || return 1
+  ok "added $marker to $file"
+}
+
+pkg_installed() { dpkg -s "$1" >/dev/null 2>&1; }
+
 preflight() {
   if [ -z "${TERMUX_VERSION:-}" ] && [[ "${PREFIX:-}" != *com.termux* ]]; then
     echo "This script is for Termux on Android." >&2
     exit 1
   fi
+  case "$SHELL_CHOICE" in
+    bash|zsh|fish) ;;
+    *) echo "SHELL_CHOICE must be bash, zsh or fish (got '$SHELL_CHOICE')." >&2; exit 1 ;;
+  esac
+  case "$PROMPT" in
+    starship|none) ;;
+    *) echo "PROMPT must be starship or none (got '$PROMPT')." >&2; exit 1 ;;
+  esac
   if ! have curl; then
     echo "curl missing, installing..."
     pkg install -y curl || { echo "cannot install curl" >&2; exit 1; }
@@ -94,22 +130,49 @@ preflight() {
 
 pkg_opts=(-y -o Dpkg::Options::=--force-confold)
 
-install_packages() {
+wanted_packages() {
   local pkgs=(git curl unzip tmux)
-  [ "${SKIP_NVIM:-0}" != 1 ] && pkgs+=(neovim ripgrep fd clang make nodejs termux-api)
-  [ "${SKIP_SSH:-0}" != 1 ]  && pkgs+=(openssh)
+  if [ "${SKIP_NVIM:-0}" != 1 ]; then
+    pkgs+=(neovim ripgrep fd clang make nodejs termux-api)
+  fi
+  [ "${SKIP_SSH:-0}" != 1 ] && pkgs+=(openssh)
+  if [ "${SKIP_SHELL:-0}" != 1 ]; then
+    [ "$PROMPT" = starship ] && pkgs+=(starship)
+    case "$SHELL_CHOICE" in
+      zsh)  pkgs+=(zsh zsh-autosuggestions zsh-syntax-highlighting) ;;
+      fish) pkgs+=(fish) ;;
+    esac
+  fi
+  printf '%s\n' "${pkgs[@]}"
+}
 
+install_packages() {
+  local p missing=()
+  while IFS= read -r p; do
+    pkg_installed "$p" || missing+=("$p")
+  done < <(wanted_packages)
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    skip "all packages installed"
+    return 0
+  fi
+
+  echo "  missing: ${missing[*]}"
   pkg update "${pkg_opts[@]}" || warn "pkg update failed (mirror down? try: termux-change-repo)"
   if [ "${SKIP_UPGRADE:-0}" != 1 ]; then
     pkg upgrade "${pkg_opts[@]}" || warn "pkg upgrade failed, continuing"
   fi
 
-  local p missing=()
-  for p in "${pkgs[@]}"; do
-    pkg install "${pkg_opts[@]}" "$p" >/dev/null 2>&1 || missing+=("$p")
+  local failed=()
+  for p in "${missing[@]}"; do
+    if pkg install "${pkg_opts[@]}" "$p" >/dev/null 2>&1; then
+      ok "installed $p"
+    else
+      failed+=("$p")
+    fi
   done
-  if [ "${#missing[@]}" -gt 0 ]; then
-    warn "could not install: ${missing[*]}"
+  if [ "${#failed[@]}" -gt 0 ]; then
+    warn "could not install: ${failed[*]}"
     return 1
   fi
 }
@@ -119,6 +182,12 @@ install_packages() {
 install_font() {
   mkdir -p "$HOME/.termux" || return 1
   local dest="$HOME/.termux/font.ttf" tmp
+
+  if [ -s "$dest" ] && [ "${FORCE_FONT:-0}" != 1 ]; then
+    skip "font present at $dest (FORCE_FONT=1 to replace)"
+    return 0
+  fi
+
   tmp=$(mktmp) || return 1
 
   # Single file from the repo (2.7MB) first, release zip (28MB) as fallback.
@@ -140,14 +209,14 @@ termux_props() {
   local props="$HOME/.termux/termux.properties"
   mkdir -p "$HOME/.termux" || return 1
   touch "$props" || return 1
-  if ! grep -Eq '^[[:space:]]*extra-keys' "$props"; then
-    cat >> "$props" <<'EOF'
+  if grep -Eq '^[[:space:]]*extra-keys' "$props"; then
+    skip "extra-keys already set"
+    return 0
+  fi
+  cat >> "$props" <<'EOF'
 extra-keys = [['ESC','|','/','HOME','UP','END','PGUP'],['TAB','CTRL','ALT','LEFT','DOWN','RIGHT','PGDN']]
 EOF
-    ok "extra keys row added"
-  else
-    ok "extra-keys already set, left alone"
-  fi
+  ok "extra keys row added"
 }
 
 # -------------------------------------------------------------------- nvim
@@ -221,18 +290,15 @@ setup_nvim() {
   have nvim || { warn "nvim not installed"; return 1; }
   local cfg="$HOME/.config/nvim"
 
-  if [ -n "$NVIM_CONFIG_REPO" ]; then
-    if [ -d "$cfg" ]; then
-      mv "$cfg" "$cfg.bak.$(ts)" || return 1
-      ok "old config moved to $cfg.bak.*"
-    fi
-    git clone --depth 1 "$NVIM_CONFIG_REPO" "$cfg" || return 1
-    ok "cloned $NVIM_CONFIG_REPO"
+  if [ -f "$cfg/init.lua" ] || [ -f "$cfg/init.vim" ] || [ -d "$cfg/.git" ]; then
+    skip "nvim config exists at $cfg"
     return 0
   fi
 
-  if [ -f "$cfg/init.lua" ] || [ -f "$cfg/init.vim" ]; then
-    ok "existing nvim config found, left alone"
+  if [ -n "$NVIM_CONFIG_REPO" ]; then
+    rmdir "$cfg" 2>/dev/null
+    git clone --depth 1 "$NVIM_CONFIG_REPO" "$cfg" || return 1
+    ok "cloned $NVIM_CONFIG_REPO"
     return 0
   fi
 
@@ -247,25 +313,30 @@ setup_ssh() {
   local ssh_dir="$HOME/.ssh" auth="$HOME/.ssh/authorized_keys"
   mkdir -p "$ssh_dir" && chmod 700 "$ssh_dir" || return 1
 
-  if [ ! -f "$ssh_dir/id_ed25519" ]; then
+  if [ -f "$ssh_dir/id_ed25519" ]; then
+    skip "ssh key exists"
+  else
     ssh-keygen -t ed25519 -N "" -f "$ssh_dir/id_ed25519" -C "$(whoami)@termux" >/dev/null \
       || return 1
     ok "generated $ssh_dir/id_ed25519"
   fi
 
+  # Only prompt for a GitHub user when nothing is configured yet.
   local user="$GITHUB_USER"
-  [ -z "$user" ] && user=$(ask "GitHub username to import ssh keys from (blank to skip): ")
+  if [ -z "$user" ] && [ ! -s "$auth" ]; then
+    user=$(ask "GitHub username to import ssh keys from (blank to skip): ")
+  fi
 
   if [ -n "$user" ]; then
-    local keys
-    keys=$(curl -fsSL --max-time 15 "https://github.com/$user.keys") \
-      && [ -n "$keys" ] \
-      || { warn "no keys fetched for '$user'"; keys=""; }
+    local keys=""
+    keys=$(curl -fsSL --max-time 15 "https://github.com/$user.keys") || keys=""
     if [ -n "$keys" ]; then
       touch "$auth" && chmod 600 "$auth" || return 1
       printf '%s\n' "$keys" >> "$auth"
       sort -u "$auth" -o "$auth"
       ok "imported keys for $user"
+    else
+      warn "no keys fetched for '$user'"
     fi
   fi
 
@@ -275,18 +346,23 @@ setup_ssh() {
 
   have termux-wake-lock && termux-wake-lock 2>/dev/null
   if pgrep -x sshd >/dev/null 2>&1; then
-    ok "sshd already running"
+    skip "sshd running"
   else
     sshd || { warn "sshd failed to start"; return 1; }
     ok "sshd started"
   fi
 
-  mkdir -p "$HOME/.termux/boot" 2>/dev/null && cat > "$HOME/.termux/boot/sshd.sh" <<'EOF'
+  local boot="$HOME/.termux/boot/sshd.sh"
+  if [ -x "$boot" ]; then
+    skip "boot script exists"
+  elif mkdir -p "$HOME/.termux/boot"; then
+    cat > "$boot" <<'EOF'
 #!/data/data/com.termux/files/usr/bin/sh
 termux-wake-lock
 sshd
 EOF
-  chmod +x "$HOME/.termux/boot/sshd.sh" 2>/dev/null
+    chmod +x "$boot" && ok "wrote $boot"
+  fi
 
   local ip=""
   if have ip; then
@@ -295,9 +371,78 @@ EOF
   SSH_HINT="ssh -p 8022 $(whoami)@${ip:-<phone-ip>}"
 }
 
-# -------------------------------------------------------------------- main
+# ------------------------------------------------------------------- shell
 
-SSH_HINT=""
+write_starship_config() {
+  mkdir -p "$HOME/.config" || return 1
+  cat > "$HOME/.config/starship.toml" <<'EOF'
+# Compact one-line prompt for narrow phone screens.
+add_newline = false
+command_timeout = 500
+format = "$directory$git_branch$git_status$cmd_duration$character"
+
+[directory]
+truncation_length = 2
+truncation_symbol = "…/"
+
+[git_branch]
+symbol = " "
+
+[cmd_duration]
+min_time = 2000
+
+[character]
+success_symbol = "[❯](green)"
+error_symbol = "[❯](red)"
+EOF
+}
+
+setup_shell() {
+  # Login shell.
+  if [ "$SHELL_CHOICE" != bash ]; then
+    have "$SHELL_CHOICE" || { warn "$SHELL_CHOICE not installed"; return 1; }
+    local cur=""
+    cur=$(readlink "$HOME/.termux/shell" 2>/dev/null || true)
+    if [ "$(basename "${cur:-bash}")" = "$SHELL_CHOICE" ]; then
+      skip "login shell is $SHELL_CHOICE"
+    else
+      chsh -s "$SHELL_CHOICE" && ok "login shell set to $SHELL_CHOICE" \
+        || warn "chsh failed; run: chsh -s $SHELL_CHOICE"
+    fi
+  fi
+
+  # Shell plugins (zsh only).
+  if [ "$SHELL_CHOICE" = zsh ]; then
+    add_block "$HOME/.zshrc" "toolbox zsh plugins" \
+'[ -f "$PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh" ] && source "$PREFIX/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
+[ -f "$PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ] && source "$PREFIX/share/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"' \
+      || return 1
+  fi
+
+  # Prompt.
+  [ "$PROMPT" = starship ] || { ok "prompt: none requested"; return 0; }
+  have starship || { warn "starship not installed"; return 1; }
+
+  if [ -f "$HOME/.config/starship.toml" ]; then
+    skip "starship.toml exists"
+  else
+    write_starship_config || return 1
+    ok "wrote ~/.config/starship.toml"
+  fi
+
+  case "$SHELL_CHOICE" in
+    bash) add_block "$HOME/.bashrc" "toolbox starship" \
+            'command -v starship >/dev/null 2>&1 && eval "$(starship init bash)"' ;;
+    zsh)  add_block "$HOME/.zshrc" "toolbox starship" \
+            'command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"' ;;
+    fish) add_block "$HOME/.config/fish/config.fish" "toolbox starship" \
+            'if type -q starship
+    starship init fish | source
+end' ;;
+  esac
+}
+
+# -------------------------------------------------------------------- main
 
 preflight
 
@@ -308,8 +453,9 @@ if [ "${SKIP_FONT:-0}" != 1 ]; then
   step "Extra keys row" termux_props
 fi
 
-[ "${SKIP_NVIM:-0}" != 1 ] && step "Neovim config" setup_nvim
-[ "${SKIP_SSH:-0}"  != 1 ] && step "SSH" setup_ssh
+[ "${SKIP_NVIM:-0}"  != 1 ] && step "Neovim config" setup_nvim
+[ "${SKIP_SSH:-0}"   != 1 ] && step "SSH" setup_ssh
+[ "${SKIP_SHELL:-0}" != 1 ] && step "Shell ($SHELL_CHOICE, prompt: $PROMPT)" setup_shell
 
 have termux-reload-settings && termux-reload-settings 2>/dev/null
 
@@ -320,9 +466,10 @@ for s in "${FAILED[@]:-}"; do [ -n "$s" ] && printf '  [FAILED] %s\n' "$s"; done
 cat <<'EOF'
 
 Manual follow-ups:
-  - Restart Termux to apply the font.
+  - Restart Termux to apply the font, shell and prompt.
   - Clipboard in nvim needs the Termux:API app (F-Droid).
   - ssh autostart on boot needs the Termux:Boot app (F-Droid), opened once.
+  - Re-running this script is safe; it only adds what is missing.
 EOF
 
 [ "${#FAILED[@]}" -eq 0 ]
