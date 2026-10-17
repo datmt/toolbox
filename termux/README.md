@@ -13,7 +13,7 @@ Read it first if you like: [`setup.sh`](setup.sh). It is safe to re-run: each st
 1. **Packages**: installs only the missing ones of `git curl unzip tmux neovim ripgrep fd clang make nodejs termux-api openssh starship` (plus `zsh`/`fish` if chosen). Nothing missing means no `pkg update`.
 2. **Font**: installs FiraCode Nerd Font Mono to `~/.termux/font.ttf` (single file from this repo, falls back to the Nerd Fonts v3.5.1 release zip). An existing font is left alone unless `FORCE_FONT=1`.
 3. **Extra keys**: adds an Esc/Tab/Ctrl/Alt/arrows row, unless you already set one.
-4. **Neovim**: writes `~/.config/nvim/init.lua` if you have no config: line numbers, syntax highlighting, 2-space tabs, smart-case search, mouse, Android clipboard paste (via Termux:API), `<space>p` paste toggle.
+4. **Neovim**: writes `~/.config/nvim/init.lua` if you have no config: line numbers, syntax highlighting, 2-space tabs, smart-case search, mouse, `yy`/`p` use nvim registers; `<space>y` / `<space>v` copy/paste via the Android clipboard (needs the Termux:API app); `<space>p` toggles paste mode.
 5. **SSH**: generates an ed25519 key if absent, optionally imports your GitHub public keys (asks only when `authorized_keys` is empty), starts `sshd` on port **8022** if not running, writes a Termux:Boot autostart script, and prints the connect command.
 6. **Shell and prompt**: installs [starship](https://starship.rs) with a compact one-line config (`~/.config/starship.toml`, written only if absent) and hooks it into your shell rc file inside a marked block, added once. With `SHELL_CHOICE=zsh` it also sets zsh as login shell and enables autosuggestions and syntax highlighting; with `fish` it sets fish up.
 

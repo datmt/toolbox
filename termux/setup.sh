@@ -225,6 +225,7 @@ write_nvim_config() {
   mkdir -p "$HOME/.config/nvim" || return 1
   cat > "$HOME/.config/nvim/init.lua" <<'EOF'
 -- Minimal defaults written by termux/setup.sh
+-- config-version: 2 (setup.sh upgrades older managed configs, with a backup)
 local o = vim.opt
 
 -- look
@@ -263,7 +264,10 @@ vim.g.mapleader = " "
 -- clear search highlight
 vim.keymap.set("n", "<Esc>", "<cmd>nohlsearch<CR>")
 
--- paste: use the Android clipboard via Termux:API when available
+-- yy / p use nvim's own registers, so they always work. The Android
+-- clipboard (needs the Termux:API app) is explicit: <leader>y copies,
+-- <leader>v pastes. Do not set clipboard=unnamedplus here: without the
+-- Termux:API app every yank/put would hang or paste nothing.
 if vim.fn.executable("termux-clipboard-set") == 1 then
   vim.g.clipboard = {
     name = "termux",
@@ -277,7 +281,9 @@ if vim.fn.executable("termux-clipboard-set") == 1 then
     },
     cache_enabled = 0,
   }
-  o.clipboard = "unnamedplus"
+  vim.keymap.set({ "n", "v" }, "<leader>y", '"+y', { desc = "yank to Android clipboard" })
+  vim.keymap.set("n", "<leader>Y", '"+yy', { desc = "yank line to Android clipboard" })
+  vim.keymap.set({ "n", "v" }, "<leader>v", '"+p', { desc = "paste from Android clipboard" })
 end
 
 -- insert mode paste from the terminal (long-press paste) works via bracketed
@@ -289,6 +295,16 @@ EOF
 setup_nvim() {
   have nvim || { warn "nvim not installed"; return 1; }
   local cfg="$HOME/.config/nvim"
+
+  # Upgrade a config this script wrote earlier (never a user's own config).
+  if [ -f "$cfg/init.lua" ] \
+     && grep -q 'written by termux/setup.sh' "$cfg/init.lua" \
+     && ! grep -q 'config-version: 2' "$cfg/init.lua"; then
+    backup "$cfg/init.lua"
+    write_nvim_config || return 1
+    ok "upgraded managed nvim config to v2 (clipboard fix)"
+    return 0
+  fi
 
   if [ -f "$cfg/init.lua" ] || [ -f "$cfg/init.vim" ] || [ -d "$cfg/.git" ]; then
     skip "nvim config exists at $cfg"
