@@ -7,6 +7,7 @@ Small tools and utilities.
 | [`termux/`](termux/) | One-line Termux setup: Nerd Font, neovim, ssh |
 | [`osui/`](osui/) | Local web UI for [OpenSnitch](https://github.com/evilsocket/opensnitch) |
 | [`datmt-sweep/`](datmt-sweep/) | Terminal tool for cleaning a Linux box and finding battery drains |
+| [`run-or-raise-gnome-fix/`](run-or-raise-gnome-fix/) | Patch run-or-raise GNOME extension for GNOME 51 |
 
 ## Termux quick start
 
