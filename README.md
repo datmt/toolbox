@@ -8,6 +8,7 @@ Small tools and utilities.
 | [`osui/`](osui/) | Local web UI for [OpenSnitch](https://github.com/evilsocket/opensnitch) |
 | [`datmt-sweep/`](datmt-sweep/) | Terminal tool for cleaning a Linux box and finding battery drains |
 | [`run-or-raise-gnome-fix/`](run-or-raise-gnome-fix/) | Patch run-or-raise GNOME extension for GNOME 51 |
+| [`ble-hid-fix/`](ble-hid-fix/) | Fix BLE mouse/keyboard paired but not working (`uhid` / kernel upgrade) |
 
 ## Termux quick start
 
