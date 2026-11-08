@@ -55,6 +55,8 @@ sudo cp config.json /etc/sing-box/config.json
 sudo sing-box check -c /etc/sing-box/config.json && sudo systemctl restart sing-box
 ```
 
+**Git over SSH (port 22) needs the `ip_cidr` rule.** SSH has no TLS name to sniff, and with Tailscale DNS the resolver bypasses the TUN, so the domain rule never matches. The config lists GitHub's ranges (`curl -s https://api.github.com/meta` shows current ones under `git`, `web`, `api`). Update them if git over SSH starts going direct again.
+
 Put IPs in their own rule (`{"ip_cidr": ["1.2.3.4/32"], "outbound": "gw"}`). Fields in one rule are ANDed.
 
 ## Gotchas
