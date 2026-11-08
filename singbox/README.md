@@ -59,6 +59,22 @@ sudo sing-box check -c /etc/sing-box/config.json && sudo systemctl restart sing-
 
 Put IPs in their own rule (`{"ip_cidr": ["1.2.3.4/32"], "outbound": "gw"}`). Fields in one rule are ANDed.
 
+## sbadd.py: add entries from the command line
+
+```sh
+sudo ./sbadd.py "example.com, *.foo.org, *gmail.com, 1.2.3.4, 10.0.0.0/8"
+```
+
+Takes comma/space separated entries, adds them to the right rule in `/etc/sing-box/config.json` (override with `-c`), runs `sing-box check` (restores the old config on failure) and restarts the service (`--no-restart` to skip). Previous config is saved as `config.json.bak`.
+
+| Entry | Becomes |
+| --- | --- |
+| `example.com` or `*.example.com` | `domain_suffix` (the domain and all subdomains) |
+| `*gmail.com`, `bar*.net` (any other `*`) | `domain_regex` (`*` means "anything") |
+| `1.2.3.4`, `10.0.0.0/8` | `ip_cidr` |
+
+Note `*gmail.com` also matches `notgmail.com`; use `gmail.com` for just the domain and its subdomains.
+
 ## Gotchas
 
 - **Tailscale gateway: the `ts` outbound is required.** `auto_detect_interface` binds sockets to the physical NIC, so a Tailscale IP is unreachable and the dial hangs (`dial tcp 100.x:22: i/o timeout`). The `ts` outbound binds to `tailscale0`, and `gw` uses it as `detour`. If your gateway has a public IP, drop `ts` and `detour`.
