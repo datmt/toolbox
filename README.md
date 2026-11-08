@@ -9,6 +9,7 @@ Small tools and utilities.
 | [`datmt-sweep/`](datmt-sweep/) | Terminal tool for cleaning a Linux box and finding battery drains |
 | [`run-or-raise-gnome-fix/`](run-or-raise-gnome-fix/) | Patch run-or-raise GNOME extension for GNOME 51 |
 | [`ble-hid-fix/`](ble-hid-fix/) | Fix BLE mouse/keyboard paired but not working (`uhid` / kernel upgrade) |
+| [`singbox/`](singbox/) | Route chosen domains (GitHub, Claude, OpenAI...) through an SSH gateway with sing-box |
 
 ## Termux quick start
 

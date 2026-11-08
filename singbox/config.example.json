@@ -1,0 +1,96 @@
+{
+  "log": {
+    "level": "info"
+  },
+  "dns": {
+    "servers": [
+      {
+        "type": "local",
+        "tag": "local"
+      }
+    ]
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "interface_name": "singtun",
+      "address": [
+        "172.19.255.1/30"
+      ],
+      "auto_route": true,
+      "strict_route": false,
+      "route_exclude_address": [
+        "100.64.0.0/10",
+        "192.168.0.0/16",
+        "172.16.0.0/12",
+        "10.0.0.0/8"
+      ]
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    },
+    {
+      "type": "direct",
+      "tag": "ts",
+      "bind_interface": "tailscale0"
+    },
+    {
+      "type": "ssh",
+      "tag": "gw",
+      "server": "GATEWAY_TAILSCALE_IP",
+      "server_port": 22,
+      "user": "GATEWAY_USER",
+      "private_key_path": "/home/YOURUSER/.ssh/id_rsa",
+      "host_key": [
+        "ssh-ed25519 GATEWAY_ED25519_PUBKEY",
+        "ecdsa-sha2-nistp256 GATEWAY_ECDSA_PUBKEY"
+      ],
+      "detour": "ts"
+    }
+  ],
+  "route": {
+    "auto_detect_interface": true,
+    "default_domain_resolver": "local",
+    "rules": [
+      {
+        "action": "sniff"
+      },
+      {
+        "protocol": "dns",
+        "action": "hijack-dns"
+      },
+      {
+        "domain_suffix": [
+          "github.com",
+          "githubusercontent.com",
+          "githubassets.com",
+          "ghcr.io",
+          "claude.ai",
+          "claude.com",
+          "anthropic.com",
+          "gemini.google.com",
+          "aistudio.google.com",
+          "ai.google.dev",
+          "makersuite.google.com",
+          "generativelanguage.googleapis.com",
+          "geminicli.com",
+          "openai.com",
+          "chatgpt.com",
+          "oaistatic.com",
+          "oaiusercontent.com",
+          "x.com",
+          "twitter.com",
+          "twimg.com",
+          "t.co",
+          "x.ai"
+        ],
+        "outbound": "gw"
+      }
+    ],
+    "final": "direct"
+  }
+}
